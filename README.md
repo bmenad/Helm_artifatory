@@ -510,6 +510,311 @@ deploy_to_argocd:
 
 
 
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+h1. 🧭 Helm Charts Dependency Workflow with Artifactory and ArgoCD
+
+h2. 🎯 Objective
+This guide explains — in a visual and step-by-step way — how to manage Helm chart dependencies between:
+
+A parent chart hosted in Git (different environments: dev, qual, prod).
+
+A child chart hosted in Artifactory (templated chart with Deployment, Service, Ingress, etc.).
+
+It covers:
+
+Directory structures of both charts.
+
+Packaging and pushing the child chart into Artifactory.
+
+Local testing with helm template.
+
+Configuring ArgoCD to use passCredentials: true for dependency resolution.
+
+Syncing and validating deployment via ArgoCD.
+
+h2. 🏗️ 1. Global Overview
+
+{code:none|title=Helm Dependency Flow}
+┌──────────────────────────────────────────┐
+│ ArgoCD │
+│ (Application sync and rendering) │
+└────────────────────┬─────────────────────┘
+│
+▼
+┌────────────────────────────────┐
+│ Parent Chart (Git Repository) │
+│ env: dev / qual / prod │
+│ - values-dev.yaml │
+│ - values-qual.yaml │
+│ - values-prod.yaml │
+│ - ConfigMap (env data) │
+│ - Chart.yaml (dependency link) │
+└────────────────┬────────────────┘
+│ dependency
+▼
+┌────────────────────────────────┐
+│ Child Chart (Artifactory) │
+│ - values.yaml (defaults) │
+│ - deployment.yaml │
+│ - service.yaml │
+│ - ingress.yaml │
+└────────────────────────────────┘
+{code}
+
+h2. 🧩 2. Git Repository: Parent Chart Structure
+
+{code:none|title=Parent Chart Structure (Git)}
+vetacheck-chart/
+├── Chart.yaml
+├── values-dev.yaml
+├── values-qual.yaml
+├── values-prod.yaml
+├── templates/
+│ ├── configmap.yaml
+│ ├── NOTES.txt
+│ └── _helpers.tpl
+{code}
+
+Example Chart.yaml (Parent):
+{code:yaml}
+apiVersion: v2
+name: vetacheck
+version: 1.0.0
+description: Vetacheck parent chart
+dependencies:
+
+name: tomcat-app
+version: 1.0.0
+repository: "https://artifactory.example.com/artifactory/helm
+"
+{code}
+
+Example values-dev.yaml:
+{code:yaml}
+environment: dev
+configFile: data-dev.txt
+
+tomcat-app:
+image:
+repository: myrepo/tomcat
+tag: "2.0.0"
+ingress:
+enabled: true
+host: vetacheck.dev.example.com
+path: /vetacheck
+{code}
+
+Example ConfigMap Template:
+{code:yaml|title=templates/configmap.yaml}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+name: vetacheck-config
+data:
+environment: {{ .Values.environment }}
+data-file: {{ .Values.configFile }}
+{code}
+
+h2. 🧱 3. Artifactory Repository: Child Chart Structure
+
+{code:none|title=Child Chart Structure (Artifactory)}
+tomcat-app/
+├── Chart.yaml
+├── values.yaml
+└── templates/
+├── deployment.yaml
+├── service.yaml
+├── ingress.yaml
+├── NOTES.txt
+└── _helpers.tpl
+{code}
+
+Example Chart.yaml (Child):
+{code:yaml}
+apiVersion: v2
+name: tomcat-app
+version: 1.0.0
+description: Tomcat webapp base chart
+appVersion: "1.0.0"
+{code}
+
+Example values.yaml (defaults):
+{code:yaml}
+replicaCount: 1
+image:
+repository: tomcat
+tag: "latest"
+pullPolicy: IfNotPresent
+service:
+type: ClusterIP
+port: 8080
+ingress:
+enabled: false
+className: nginx
+path: /
+host: ""
+resources: {}
+{code}
+
+h2. 📦 4. Packaging and Publishing to Artifactory
+
+From the tomcat-app/ directory:
+{code:bash}
+
+Package the child chart
+
+helm package .
+
+Example output:
+Successfully packaged chart and saved it to: ./tomcat-app-1.0.0.tgz
+Push the package to Artifactory
+
+curl -u <user>:<token> -T tomcat-app-1.0.0.tgz
+"https://artifactory.example.com/artifactory/helm/tomcat-app-1.0.0.tgz
+"
+{code}
+
+Then verify via browser or CLI:
+{code:bash}
+helm repo add artifactory https://artifactory.example.com/artifactory/helm
+
+helm search repo artifactory/tomcat-app
+{code}
+
+h2. 🧪 5. Local Testing Before ArgoCD
+
+From the parent chart directory:
+{code:bash}
+
+Download dependencies
+
+helm dependency update
+
+Render templates for 'dev' environment
+
+helm template vetacheck . -f values-dev.yaml
+{code}
+
+✅ If rendering succeeds, Helm correctly resolves the dependency from Artifactory.
+
+h2. ⚙️ 6. ArgoCD Configuration
+
+Example ArgoCD Application Manifest:
+{code:yaml|title=argocd-app.yaml}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+name: vetacheck
+namespace: argocd
+spec:
+project: default
+source:
+repoURL: https://gitlab.example.com/helm/vetacheck-chart.git
+
+targetRevision: main
+path: .
+helm:
+releaseName: vetacheck
+valueFiles:
+- values-dev.yaml
+passCredentials: true
+destination:
+server: https://kubernetes.default.svc
+
+namespace: ns-vetacheck-dev
+syncPolicy:
+automated:
+prune: true
+selfHeal: true
+{code}
+
+Key point:
+passCredentials: true allows ArgoCD to use the same credentials defined for the Git repo when pulling the child chart from Artifactory.
+
+h2. 🔄 7. Test Deployment via ArgoCD
+
+In ArgoCD UI:
+
+Create Application → choose Git repo → set path to parent chart → select environment values file.
+
+Enable “Auto-Sync” and check “Self-Heal”.
+
+Sync the application.
+
+Validation:
+
+The Deployment, Service, and Ingress are rendered from the tomcat-app chart.
+
+The ConfigMap is rendered from the parent chart.
+
+Changing values-dev.yaml (e.g. image tag) triggers ArgoCD to redeploy automatically.
+
+{code:bash}
+
+Manual refresh (optional)
+
+argocd app refresh vetacheck
+{code}
+
+h2. 🧠 8. Common Troubleshooting
+
+|| Error || Cause || Solution ||
+| nil pointer evaluating interface().enabled | ingress block missing in parent values | Add ingress: enabled: true |
+| failed to execute helm template | Missing dependency or access issue | Check passCredentials and Artifactory repo URL |
+| Image tag not updated | Helm cache | Delete charts/ and rerun helm dependency update |
+
+h2. 🧰 9. Best Practices
+
+Git Side (Parent Chart)
+
+Use one values-<env>.yaml per environment.
+
+Keep configmap logic simple and environment-driven.
+
+Always run helm template locally before commit.
+
+Artifactory Side (Child Chart)
+
+Always version your chart (e.g. 1.0.1, 1.0.2).
+
+Don’t modify an existing tgz version — push new ones.
+
+Keep templates minimal and reusable.
+
+ArgoCD Side
+
+Use passCredentials: true.
+
+Enable auto sync + self heal.
+
+Avoid fragile NOTES.txt; wrap logic safely with Helm conditions.
+
+h2. 📎 10. Summary Diagram
+
+{code:none}
+┌─────────────────────────────────────────────┐
+│ Git Repository (Parent Helm Chart) │
+│ ├── Chart.yaml (dependency → Artifactory) │
+│ ├── values-dev.yaml / values-qual.yaml ... │
+│ ├── templates/configmap.yaml │
+│ └── Managed by ArgoCD │
+└─────────────────────────────────────────────┘
+│
+▼
+┌─────────────────────────────────────────────┐
+│ Artifactory (Child Helm Chart) │
+│ ├── Chart.yaml │
+│ ├── values.yaml (defaults) │
+│ ├── deployment.yaml, service.yaml, ingress │
+│ └── Published as .tgz via helm package │
+└─────────────────────────────────────────────┘
+{code}
+
+✅ This Confluence page is ready to paste as-is (use “Insert > Markup > Confluence Wiki”).
+It provides: architecture overview, directory structures, YAML templates, packaging commands, testing steps, ArgoCD configuration, and troubleshooting — perfect for demo or onboarding documentation.
+
 
 
 
