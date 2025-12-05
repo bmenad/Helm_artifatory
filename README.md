@@ -1,77 +1,242 @@
+Voici un README UNIQUE, COMPLET, FINAL, intégrant TOUT ce que tu demandes :
+✔ scripts
+✔ GitLab CI
+✔ sécurité des tokens
+✔ e-mails par instance
+✔ envoi automatique tous les lundis à 09h00
+✔ arrêt automatique à une date limite
+✔ planning GitLab Schedules expliqué
+✔ tout dans un seul fichier prêt à mettre sur GitHub
+
+📘 README – Automatisation ArgoCD : Inventaire, Statistiques & Notifications Hebdomadaires
+
+Ce projet automatise :
+
+l’extraction des applications nprod dans plusieurs instances ArgoCD
+
+la génération de JSON d’inventaire et statistiques
+
+l’envoi automatique d’emails chaque lundi à 09h00
+
+jusqu’à une date limite définie
+
+tout en sécurisant les accès grâce à des tokens ArgoCD stockés dans GitLab CI
+
+📁 Arborescence du dépôt
+.
+├── README.md
+├── .gitlab-ci.yml
+├── scripts/
+│   ├── generate_stats.sh
+│   └── send_email.py
+└── config/
+    └── mailing-lists.yaml
+
+🔐 Sécurisation : Tokens ArgoCD (méthode recommandée)
+1. Générer un token pour chaque instance
+argocd login argocd-<instance>-devops.group.echonet --username admin --password <PWD>
+argocd account generate-token --expires-in 90d
+
+2. Ajouter les tokens dans GitLab CI
+
+Settings → CI/CD → Variables
+
+KEY	VALUE	MASKED	PROTECTED
+ARGOCD_TOKEN_ETNA	<token>	✔	✔
+ARGOCD_TOKEN_HELIOS	<token>	✔	✔
+ARGOCD_TOKEN_CALLIOPE	<token>	✔	✔
+📄 config/mailing-lists.yaml
+
+Liste des emails par instance ArgoCD :
+
+instances:
+  etna:
+    emails:
+      - "alice@company.com"
+      - "bob@company.com"
+      - "team-etna@company.com"
+
+  helios:
+    emails:
+      - "team-helios@company.com"
+
+  calliope:
+    emails:
+      - "calliope-dev@company.com"
+
+🧰 scripts/generate_stats.sh
 #!/bin/bash
+set -euo pipefail
 
-PROD_SERVER="argocd-prod.example.com"
-NPROD_SERVER="argocd-nprod.example.com"
+INS="$1"
+DATE_LIMIT="$2"   # format YYYY-MM-DD
 
-PROD_TOKEN="$ARGOCD_PROD_TOKEN"
-NPROD_TOKEN="$ARGOCD_NPROD_TOKEN"
+# Vérification de la date limite
+TODAY=$(date +%Y-%m-%d)
+if [[ "$TODAY" > "$DATE_LIMIT" ]]; then
+  echo "[INFO] Date limite dépassée. Aucune notification envoyée."
+  exit 0
+fi
 
-TMP_PROD="prod_fp.tmp"
-TMP_NPROD="nprod_fp.tmp"
+TOKEN_VAR="ARGOCD_TOKEN_${INS^^}"
+TOKEN="${!TOKEN_VAR}"
 
-rm -f "$TMP_PROD" "$TMP_NPROD"
+OUTPUT_FILE="prod_argocd_list_applications_by_nprod_project_${INS}.json"
+STAT_FILE="prod_argocd_stat_applications_nprod_project_${INS}.json"
+PROD_SERVER="argocd-${INS}-devops.group.echonet"
 
-argocd login "$PROD_SERVER" --username admin --auth-token "$PROD_TOKEN" --grpc-web --insecure
-argocd login "$NPROD_SERVER" --username admin --auth-token "$NPROD_TOKEN" --grpc-web --insecure
+argocd login "$PROD_SERVER" --grpc-web --auth-token "$TOKEN"
 
-extract_fingerprint() {
-    jq -r '
-        .spec.source.repoURL + "|" +
-        (.spec.source.path // .spec.source.chart // "") + "|" +
-        (.spec.source.targetRevision // "") + "|" +
-        .spec.destination.server + "|" +
-        .spec.destination.namespace
-    '
-}
+DATA=$(argocd app list -o json | jq '
+  group_by(.spec.project)
+  | map({ project: .[0].spec.project, applications: map(.metadata.name) })
+  | map(select(.project | contains("nprod")))
+')
 
-###########################################
-# PROD : fingerprint → appname
-###########################################
-for APP in $(argocd --server "$PROD_SERVER" app list -o name); do
-    JSON=$(argocd --server "$PROD_SERVER" app get "$APP" -o json)
-    FP=$(echo "$JSON" | extract_fingerprint)
-    echo "$FP|$APP" >> "$TMP_PROD"
-done
+echo "$DATA" > "$OUTPUT_FILE"
 
-###########################################
-# NPROD : fingerprint → appname
-###########################################
-for APP in $(argocd --server "$NPROD_SERVER" app list -o name); do
-    JSON=$(argocd --server "$NPROD_SERVER" app get "$APP" -o json)
-    FP=$(echo "$JSON" | extract_fingerprint)
-    echo "$FP|$APP" >> "$TMP_NPROD"
-done
+PROJECTS=$(echo "$DATA" | jq 'map({project: .project, nb_applis: (.applications | length)})')
+TOTAL=$(echo "$DATA" | jq '[.[].applications | length] | add')
+
+jq -n \
+  --arg ins "$INS" \
+  --argjson prj "$PROJECTS" \
+  --argjson total "$TOTAL" \
+  '{instance: $ins, projects: $prj, total_applis: $total}' \
+  > "$STAT_FILE"
+
+echo "[OK] Fichier statistique généré : $STAT_FILE"
+
+📧 scripts/send_email.py
+import yaml
+import json
+import smtplib
+import argparse
+from email.mime.text import MIMEText
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--instance", required=True)
+parser.add_argument("--json", required=True)
+args = parser.parse_args()
+
+with open("config/mailing-lists.yaml") as f:
+    config = yaml.safe_load(f)
+
+with open(args.json) as f:
+    stats = json.load(f)
+
+emails = config["instances"][args.instance]["emails"]
+
+body = f"""
+Bonjour,
+
+Voici les applications restantes à migrer pour l'instance {args.instance} :
+
+{json.dumps(stats, indent=2)}
+
+Merci de finaliser la migration avant la date limite.
+
+Cordialement,
+L’équipe DevOps.
+"""
+
+msg = MIMEText(body)
+msg["Subject"] = f"[MIGRATION] Applications restantes - {args.instance}"
+msg["From"] = "devops@company.com"
+msg["To"] = ", ".join(emails)
+
+with smtplib.SMTP("smtp.company.com") as s:
+    s.sendmail(msg["From"], emails, msg.as_string())
+
+🧩 .gitlab-ci.yml
+stages:
+  - inventory
+  - notify
+
+variables:
+  DATE_LIMIT: "2025-03-31"   # 🔥 MODIFIABLE : date de fin d'envoi automatique
+
+inventory:
+  stage: inventory
+  image: cdtools:latest
+  script:
+    - bash scripts/generate_stats.sh "$INSTANCE" "$DATE_LIMIT"
+  artifacts:
+    paths:
+      - "*.json"
+  rules:
+    - if: '$CI_PIPELINE_SCHEDULED == "true"'
+
+notify:
+  stage: notify
+  image: python:3.11
+  script:
+    - pip install pyyaml
+    - python scripts/send_email.py \
+        --instance "$INSTANCE" \
+        --json "prod_argocd_stat_applications_nprod_project_${INSTANCE}.json"
+  rules:
+    - if: '$CI_PIPELINE_SCHEDULED == "true"'
+    - exists:
+        - "prod_argocd_stat_applications_nprod_project_${INSTANCE}.json"
+
+🗓️ Envoi automatique tous les lundis à 09h00
+1. Aller dans GitLab → CI/CD → Schedules
+
+Créer un schedule par instance :
+
+🔹 ETNA
+Champ	Valeur
+Description	notify-etna
+Interval	Custom
+Crontab	0 9 * * 1
+Run for	Main branch
+Variable	INSTANCE=etna
+🔹 HELIOS
+Champ	Valeur
+Description	notify-helios
+Interval	Custom
+Crontab	0 9 * * 1
+Variable	INSTANCE=helios
+🔹 CALLIOPE
+Champ	Valeur
+Description	notify-calliope
+Interval	Custom
+Crontab	0 9 * * 1
+Variable	INSTANCE=calliope
+
+📌 Signification de la crontab :
+
+0 9 * * 1  →  Tous les lundis à 09h00
+
+2. Arrêt automatique
+
+Grâce à :
+
+if [[ "$TODAY" > "$DATE_LIMIT" ]]; then exit 0; fi
 
 
-###########################################
-# RESULTATS
-###########################################
-echo "app_prod;app_nprod;fingerprint" > apps_equivalentes.csv
-echo "app_prod;fingerprint" > apps_manquantes.csv
-echo "app_nprod;fingerprint" > apps_orphelines.csv
+AUCUNE notification n’est envoyée après la date limite.
 
-###########################################
-# MATCH : PROD vs NPROD
-###########################################
-while IFS='|' read -r FP APP_PROD; do
-    APP_NPROD=$(grep "^$FP|" "$TMP_NPROD" | cut -d '|' -f 6-)
+🎯 Résultat final
 
-    if [ -n "$APP_NPROD" ]; then
-        echo "$APP_PROD;$APP_NPROD;$FP" >> apps_equivalentes.csv
-    else
-        echo "$APP_PROD;$FP" >> apps_manquantes.csv
-    fi
+Le système :
 
-done < "$TMP_PROD"
+s'exécute automatiquement chaque lundi à 09:00
 
-###########################################
-# ORPHELINES : NPROD qui n’ont pas de match PROD
-###########################################
-while IFS='|' read -r FP APP_NPROD; do
-    APP_PROD=$(grep "^$FP|" "$TMP_PROD" | cut -d '|' -f 6-)
+collecte les applications nprod par instance
 
-    if [ -z "$APP_PROD" ]; then
-        echo "$APP_NPROD;$FP" >> apps_orphelines.csv
-    fi
+génère les JSON d’inventaire et de statistiques
 
-done < "$TMP_NPROD"
+envoie les emails aux bonnes équipes
+
+arrête automatiquement l’envoi quand la DATE_LIMIT est dépassée
+
+fonctionne avec des tokens ArgoCD sécurisés
+
+est entièrement automatisé dans GitLab CI/CD
+
+Si tu veux, je peux aussi générer :
+✔ un fichier JSON global fusionnant toutes les instances
+✔ un tableau de bord Grafana/HTML
+✔ un merge automatique de toutes les stats dans un seul rapport
