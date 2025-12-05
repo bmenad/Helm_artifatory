@@ -108,6 +108,7 @@ jq -n \
 echo "[OK] Fichier statistique généré : $STAT_FILE"
 
 📧 scripts/send_email.py
+
 import yaml
 import json
 import smtplib
@@ -119,14 +120,25 @@ parser.add_argument("--instance", required=True)
 parser.add_argument("--json", required=True)
 args = parser.parse_args()
 
+# Chargement des emails depuis YAML
 with open("config/mailing-lists.yaml") as f:
     config = yaml.safe_load(f)
 
+# Chargement des statistiques JSON
 with open(args.json) as f:
     stats = json.load(f)
 
+# Vérifier s'il reste des applications à migrer
+total = stats.get("total_applis", 0)
+
+if total == 0:
+    print("[INFO] Aucune application à migrer. Aucun mail envoyé.")
+    exit(0)
+
+# Récupérer la liste des emails pour l'instance
 emails = config["instances"][args.instance]["emails"]
 
+# Contenu du mail
 body = f"""
 Bonjour,
 
@@ -137,16 +149,23 @@ Voici les applications restantes à migrer pour l'instance {args.instance} :
 Merci de finaliser la migration avant la date limite.
 
 Cordialement,
-L’équipe DevOps.
+L’équipe DevOps
 """
 
+# Construction du message email
 msg = MIMEText(body)
 msg["Subject"] = f"[MIGRATION] Applications restantes - {args.instance}"
-msg["From"] = "devops@company.com"
+msg["From"] = "no-reply-devops@company.com"
 msg["To"] = ", ".join(emails)
 
-with smtplib.SMTP("smtp.company.com") as s:
-    s.sendmail(msg["From"], emails, msg.as_string())
+# Envoi SMTP (mode non authentifié ou via relai interne)
+try:
+    with smtplib.SMTP("smtp.company.com") as s:
+        s.sendmail(msg["From"], emails, msg.as_string())
+    print("[OK] Email envoyé avec succès")
+except Exception as e:
+    print(f"[ERROR] Échec de l'envoi du mail : {e}")
+    exit(1)
 
 🧩 .gitlab-ci.yml
 stages:
