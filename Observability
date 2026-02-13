@@ -1,0 +1,105 @@
+Bonjour,
+
+Voici une synthèse structurée des besoins d’observabilité pour nos instances **Argo CD** déployées via operator GitOps sur **OpenShift**, en complément des métriques actuelles issues de **Prometheus**, **Grafana** et des seuils définis dans **Dynatrace**.
+
+---
+
+# 🎯 Objectif global
+
+Garantir la **stabilité, la performance et la prédictibilité** de la plateforme GitOps multi-tenant, malgré une forte variabilité de volumétrie (de quelques dizaines à plus de 4000 applications par instance).
+
+---
+
+# 1️⃣ Observabilité Infrastructure (Run & Capacity)
+
+Objectif : prévenir la saturation et les incidents techniques.
+
+À surveiller :
+
+* CPU / Memory par composant (application-controller, repo-server, server, redis)
+* Memory du application-controller (signal critique à forte volumétrie)
+* Restart / OOMKilled
+* Utilisation des quotas namespace (requests vs limits)
+* Utilisation PVC si présents
+* Tendance de croissance mémoire (memory slope)
+
+Alertes clés :
+
+* Memory > 80% limit
+* OOM imminent
+* Namespace proche quota (>80%)
+* Instance indisponible (healthcheck URL déjà couvert par Dynatrace)
+
+---
+
+# 2️⃣ Observabilité Performance GitOps (cœur métier)
+
+Objectif : mesurer la capacité réelle de reconciliation.
+
+Indicateurs indispensables :
+
+* Nombre d’applications par instance
+* Durée de sync (moyenne + P95)
+* Taux d’échec de sync
+* Nombre d’applications OutOfSync / Degraded (en %)
+* Profondeur de workqueue (backlog controller)
+
+Questions auxquelles on doit pouvoir répondre :
+
+* Combien de temps met une modification Git à être appliquée ?
+* Le controller est-il saturé ?
+* Une instance à 4000 apps reste-t-elle prédictible ?
+
+---
+
+# 3️⃣ Observabilité Multi-tenant & Équilibrage
+
+Objectif : maîtriser les écarts entre petits et gros tenants.
+
+À corréler :
+
+* Apps count ↔ Memory controller
+* Apps count ↔ Sync duration
+* Apps count ↔ Failure rate
+
+Mettre en place :
+
+* Classement des instances (Small / Medium / Large)
+* Dashboard “Top tenants” (CPU, mémoire, volumétrie apps)
+* Indicateur de saturation GitOps basé sur volumétrie
+
+---
+
+# 4️⃣ Fiabilité & Risque plateforme
+
+Objectif : limiter le blast radius.
+
+À surveiller :
+
+* % d’applications saines par instance
+* Backlog prolongé (> X minutes)
+* Sync failure rate anormal
+* Throttling API Kubernetes
+
+---
+
+# 📌 Synthèse
+
+Aujourd’hui nous couvrons correctement :
+
+* Consommation CPU / Memory
+* Quotas namespace
+* Healthcheck des endpoints
+* Visualisation fonctionnelle des révisions
+
+Les besoins complémentaires à renforcer sont :
+
+* Corrélation volumétrie ↔ performance
+* Détection précoce de saturation controller
+* Suivi de la latence GitOps (sync P95)
+* Indicateurs multi-tenant comparables
+* Alerting basé sur comportement et non uniquement sur seuils CPU/RAM
+
+L’enjeu principal n’est pas uniquement la consommation, mais la **capacité de reconciliation et la stabilité GitOps à grande échelle**.
+
+Cordialement,
