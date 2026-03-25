@@ -1,4 +1,4 @@
-Bonjour,
+biBonjour,
 
 Voici une synthèse structurée des besoins d’observabilité pour nos instances **Argo CD** déployées via operator GitOps sur **OpenShift**, en complément des métriques actuelles issues de **Prometheus**, **Grafana** et des seuils définis dans **Dynatrace**.
 
@@ -103,3 +103,38 @@ Les besoins complémentaires à renforcer sont :
 L’enjeu principal n’est pas uniquement la consommation, mais la **capacité de reconciliation et la stabilité GitOps à grande échelle**.
 
 Cordialement,
+
+
+
+
+
+{{- $size := .Values.size | default "xs" }}
+{{- $sizes := .Values.sizes }}
+{{- $cfg := index $sizes $size }}
+
+
+
+controller:
+  processors:
+    operation: {{ .Values.controller.processors.operation | default 25 }}
+    status: {{ .Values.controller.processors.status | default 50 }}
+
+  resources:
+{{- toYaml $cfg.controller.resources | nindent 4 }}
+
+  replicas: {{ $cfg.controller.replicas | default 1 }}
+
+
+
+repo:
+  resources:
+{{- toYaml $cfg.repo.resources | nindent 4 }}
+
+
+
+server:
+  resources:
+{{- toYaml $cfg.server.resources | nindent 4 }}
+
+
+
