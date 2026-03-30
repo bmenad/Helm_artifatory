@@ -136,7 +136,6 @@ server:
 {{- toYaml $cfg.server.resources | nindent 4 }}
 
 
-
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -151,7 +150,7 @@ TOTAL_MAX_MEM=0
 cpu_to_m() {
   case "$1" in
     *m) echo "${1%m}" ;;
-    "") echo 0 ;;
+    ""|"null") echo 0 ;;
     *) echo "$(echo "$1 * 1000" | bc)" ;;
   esac
 }
@@ -160,7 +159,7 @@ mem_to_mi() {
   case "$1" in
     *Gi) echo "$(echo "${1%Gi} * 1024" | bc)" ;;
     *Mi) echo "${1%Mi}" ;;
-    "") echo 0 ;;
+    ""|"null") echo 0 ;;
     *) echo 0 ;;
   esac
 }
@@ -191,6 +190,12 @@ process_component() {
   local file="$1"
   local comp="$2"
 
+  # gestion enabled (dex / ha notamment)
+  enabled=$(yq eval ".${comp}.enabled // \"true\"" "$file")
+  if [[ "$enabled" == "false" ]]; then
+    return
+  fi
+
   cpu=$(yq eval ".${comp}.resources.requests.cpu // \"0\"" "$file")
   mem=$(yq eval ".${comp}.resources.requests.memory // \"0\"" "$file")
 
@@ -218,12 +223,23 @@ process_env() {
   for instance in instances/$ENV/*; do
     TMP=$(mktemp)
 
+    # merge Helm (global + instance)
     yq eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' \
       "$GLOBAL_VALUES" "$instance/values.yaml" > "$TMP"
 
-    for comp in server repoServer controller dex redis redis-ha; do
+    # composants principaux
+    for comp in server repoServer controller dex; do
       process_component "$TMP" "$comp"
     done
+
+    # redis (toujours pris)
+    process_component "$TMP" "redis"
+
+    # ha (seulement si enabled)
+    ha_enabled=$(yq eval '.ha.enabled // "false"' "$TMP")
+    if [[ "$ha_enabled" == "true" ]]; then
+      process_component "$TMP" "ha"
+    fi
 
     rm -f "$TMP"
   done
