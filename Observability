@@ -128,8 +128,7 @@ controller:
 
 repo:
   resources:
-{{- toYaml $cfg.repo.resources | nindent 4 }}
-
+{{- toYaml $cfg.repo.resources | nindent 4 }
 
 
 server:
@@ -137,4 +136,114 @@ server:
 {{- toYaml $cfg.server.resources | nindent 4 }}
 
 
+
+
+
+
+
+
+#!/bin/bash
+
+GLOBAL_VALUES="helm/values.yaml"
+
+TOTAL_CPU=0
+TOTAL_MEM=0
+
+TOTAL_NPRD_CPU=0
+TOTAL_NPRD_MEM=0
+
+TOTAL_PROD_CPU=0
+TOTAL_PROD_MEM=0
+
+cpu_to_m() {
+  [[ $1 == *m ]] && echo ${1%m} || echo "$(echo "$1 * 1000" | bc)"
+}
+
+mem_to_mi() {
+  [[ $1 == *Gi ]] && echo "$(echo "${1%Gi} * 1024" | bc)" \
+  || [[ $1 == *Mi ]] && echo "${1%Mi}" \
+  || echo 0
+}
+
+process_component() {
+  local file=$1
+  local path=$2
+
+  cpu=$(yq eval "$path.resources.requests.cpu // \"0\"" "$file")
+  mem=$(yq eval "$path.resources.requests.memory // \"0\"" "$file")
+
+  minReplicas=$(yq eval "$path.autoscaling.hpa.minReplicas" "$file")
+  replicas=$(yq eval "$path.replicas" "$file")
+
+  [[ "$replicas" == "null" ]] && replicas=1
+
+  if [[ "$minReplicas" != "null" ]]; then
+    count=$minReplicas
+  else
+    count=$replicas
+  fi
+
+  cpu_m=$(cpu_to_m "$cpu")
+  mem_mi=$(mem_to_mi "$mem")
+
+  echo "$cpu_m $mem_mi $count"
+}
+
+process_env() {
+  local ENV=$1
+
+  echo ""
+  echo "========= ENV: $ENV ========="
+
+  for instance in instances/$ENV/*; do
+    echo ""
+    echo "INSTANCE: $(basename "$instance")"
+    echo "----------------------------------------"
+
+    TMP=$(mktemp)
+
+    yq eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' \
+      "$GLOBAL_VALUES" "$instance/values.yaml" > "$TMP"
+
+    for comp in ".server" ".repoServer" ".controller"; do
+      read cpu mem count <<< $(process_component "$TMP" "$comp")
+
+      comp_cpu=$(echo "$cpu * $count" | bc)
+      comp_mem=$(echo "$mem * $count" | bc)
+
+      printf "%-12s | %2s pods | %6sm CPU | %6sMi MEM\n" "$comp" "$count" "$comp_cpu" "$comp_mem"
+
+      TOTAL_CPU=$(echo "$TOTAL_CPU + $comp_cpu" | bc)
+      TOTAL_MEM=$(echo "$TOTAL_MEM + $comp_mem" | bc)
+
+      if [[ "$ENV" == "nprd" ]]; then
+        TOTAL_NPRD_CPU=$(echo "$TOTAL_NPRD_CPU + $comp_cpu" | bc)
+        TOTAL_NPRD_MEM=$(echo "$TOTAL_NPRD_MEM + $comp_mem" | bc)
+      else
+        TOTAL_PROD_CPU=$(echo "$TOTAL_PROD_CPU + $comp_cpu" | bc)
+        TOTAL_PROD_MEM=$(echo "$TOTAL_PROD_MEM + $comp_mem" | bc)
+      fi
+    done
+
+    rm -f "$TMP"
+  done
+}
+
+echo "========= ARGOCD GLOBAL CAPACITY ========="
+
+process_env "nprd"
+process_env "prod"
+
+echo ""
+echo "============== TOTAL ==================="
+
+echo "NPRD  CPU: ${TOTAL_NPRD_CPU}m ($(echo "$TOTAL_NPRD_CPU/1000" | bc -l) cores)"
+echo "NPRD  MEM: ${TOTAL_NPRD_MEM}Mi ($(echo "$TOTAL_NPRD_MEM/1024" | bc -l) Gi)"
+
+echo "PROD  CPU: ${TOTAL_PROD_CPU}m ($(echo "$TOTAL_PROD_CPU/1000" | bc -l) cores)"
+echo "PROD  MEM: ${TOTAL_PROD_MEM}Mi ($(echo "$TOTAL_PROD_MEM/1024" | bc -l) Gi)"
+
+echo "----------------------------------------"
+echo "TOTAL CPU: ${TOTAL_CPU}m ($(echo "$TOTAL_CPU/1000" | bc -l) cores)"
+echo "TOTAL MEM: ${TOTAL_MEM}Mi ($(echo "$TOTAL_MEM/1024" | bc -l) Gi)"
 
