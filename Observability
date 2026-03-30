@@ -138,19 +138,15 @@ server:
 
 
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 GLOBAL_VALUES="helm/values.yaml"
 
-TOTAL_CPU=0
-TOTAL_MEM=0
+TOTAL_MIN_CPU=0
+TOTAL_MIN_MEM=0
 
-TOTAL_NPRD_CPU=0
-TOTAL_NPRD_MEM=0
-
-TOTAL_PROD_CPU=0
-TOTAL_PROD_MEM=0
+TOTAL_MAX_CPU=0
+TOTAL_MAX_MEM=0
 
 cpu_to_m() {
   case "$1" in
@@ -169,88 +165,81 @@ mem_to_mi() {
   esac
 }
 
-process_component() {
+get_counts() {
   local file="$1"
-  local component="$2"
+  local comp="$2"
 
-  cpu=$(yq eval ".${component}.resources.requests.cpu // \"0\"" "$file")
-  mem=$(yq eval ".${component}.resources.requests.memory // \"0\"" "$file")
-
-  minReplicas=$(yq eval ".${component}.autoscaling.hpa.minReplicas" "$file")
-  replicas=$(yq eval ".${component}.replicas" "$file")
+  min=$(yq eval ".${comp}.autoscaling.hpa.minReplicas" "$file")
+  max=$(yq eval ".${comp}.autoscaling.hpa.maxReplicas" "$file")
+  replicas=$(yq eval ".${comp}.replicas" "$file")
 
   [[ "$replicas" == "null" ]] && replicas=1
 
-  if [[ "$minReplicas" != "null" ]]; then
-    count=$minReplicas
+  if [[ "$min" != "null" ]]; then
+    min_count=$min
+    [[ "$max" == "null" ]] && max=$min
+    max_count=$max
   else
-    count=$replicas
+    min_count=$replicas
+    max_count=$replicas
   fi
+
+  echo "$min_count $max_count"
+}
+
+process_component() {
+  local file="$1"
+  local comp="$2"
+
+  cpu=$(yq eval ".${comp}.resources.requests.cpu // \"0\"" "$file")
+  mem=$(yq eval ".${comp}.resources.requests.memory // \"0\"" "$file")
+
+  read min_count max_count <<< "$(get_counts "$file" "$comp")"
 
   cpu_m=$(cpu_to_m "$cpu")
   mem_mi=$(mem_to_mi "$mem")
 
-  comp_cpu=$(echo "$cpu_m * $count" | bc)
-  comp_mem=$(echo "$mem_mi * $count" | bc)
+  min_cpu=$(echo "$cpu_m * $min_count" | bc)
+  min_mem=$(echo "$mem_mi * $min_count" | bc)
 
-  echo "$count $comp_cpu $comp_mem"
+  max_cpu=$(echo "$cpu_m * $max_count" | bc)
+  max_mem=$(echo "$mem_mi * $max_count" | bc)
+
+  TOTAL_MIN_CPU=$(echo "$TOTAL_MIN_CPU + $min_cpu" | bc)
+  TOTAL_MIN_MEM=$(echo "$TOTAL_MIN_MEM + $min_mem" | bc)
+
+  TOTAL_MAX_CPU=$(echo "$TOTAL_MAX_CPU + $max_cpu" | bc)
+  TOTAL_MAX_MEM=$(echo "$TOTAL_MAX_MEM + $max_mem" | bc)
 }
 
 process_env() {
   local ENV="$1"
 
-  echo ""
-  echo "========= ENV: $ENV ========="
-
   for instance in instances/$ENV/*; do
-    echo ""
-    echo "INSTANCE: $(basename "$instance")"
-    echo "----------------------------------------"
-
     TMP=$(mktemp)
 
-    # Merge Helm values
     yq eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' \
       "$GLOBAL_VALUES" "$instance/values.yaml" > "$TMP"
 
-    for comp in "server" "repoServer" "controller"; do
-      read count cpu mem <<< "$(process_component "$TMP" "$comp")"
-
-      printf "%-12s | %2s pods | %6sm CPU | %6sMi MEM\n" "$comp" "$count" "$cpu" "$mem"
-
-      TOTAL_CPU=$(echo "$TOTAL_CPU + $cpu" | bc)
-      TOTAL_MEM=$(echo "$TOTAL_MEM + $mem" | bc)
-
-      if [[ "$ENV" == "nprd" ]]; then
-        TOTAL_NPRD_CPU=$(echo "$TOTAL_NPRD_CPU + $cpu" | bc)
-        TOTAL_NPRD_MEM=$(echo "$TOTAL_NPRD_MEM + $mem" | bc)
-      else
-        TOTAL_PROD_CPU=$(echo "$TOTAL_PROD_CPU + $cpu" | bc)
-        TOTAL_PROD_MEM=$(echo "$TOTAL_PROD_MEM + $mem" | bc)
-      fi
+    for comp in server repoServer controller dex redis redis-ha; do
+      process_component "$TMP" "$comp"
     done
 
     rm -f "$TMP"
   done
 }
 
-echo "========= ARGOCD GLOBAL CAPACITY ========="
-
+# Traitement
 process_env "nprd"
 process_env "prod"
 
+# Résultat final
+echo "========= RESULTAT GLOBAL ========="
 echo ""
-echo "============== TOTAL ==================="
-echo "NPRD CPU: ${TOTAL_NPRD_CPU}m ($(echo "$TOTAL_NPRD_CPU/1000" | bc -l) cores)"
-echo "NPRD MEM: ${TOTAL_NPRD_MEM}Mi ($(echo "$TOTAL_NPRD_MEM/1024" | bc -l) Gi)"
-
-echo "PROD CPU: ${TOTAL_PROD_CPU}m ($(echo "$TOTAL_PROD_CPU/1000" | bc -l) cores)"
-echo "PROD MEM: ${TOTAL_PROD_MEM}Mi ($(echo "$TOTAL_PROD_MEM/1024" | bc -l) Gi)"
-
-echo "----------------------------------------"
-echo "TOTAL CPU: ${TOTAL_CPU}m ($(echo "$TOTAL_CPU/1000" | bc -l) cores)"
-echo "TOTAL MEM: ${TOTAL_MEM}Mi ($(echo "$TOTAL_MEM/1024" | bc -l) Gi)"
-
-
-
-
+echo "MIN (autoscaling minReplicas):"
+echo "CPU: ${TOTAL_MIN_CPU}m ($(echo "$TOTAL_MIN_CPU/1000" | bc -l) cores)"
+echo "MEM: ${TOTAL_MIN_MEM}Mi ($(echo "$TOTAL_MIN_MEM/1024" | bc -l) Gi)"
+echo ""
+echo "MAX (autoscaling maxReplicas):"
+echo "CPU: ${TOTAL_MAX_CPU}m ($(echo "$TOTAL_MAX_CPU/1000" | bc -l) cores)"
+echo "MEM: ${TOTAL_MAX_MEM}Mi ($(echo "$TOTAL_MAX_MEM/1024" | bc -l) Gi)"
