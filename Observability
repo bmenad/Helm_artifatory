@@ -259,3 +259,121 @@ echo ""
 echo "MAX (autoscaling maxReplicas):"
 echo "CPU: ${TOTAL_MAX_CPU}m ($(echo "$TOTAL_MAX_CPU/1000" | bc -l) cores)"
 echo "MEM: ${TOTAL_MAX_MEM}Mi ($(echo "$TOTAL_MAX_MEM/1024" | bc -l) Gi)"
+
+
+
+
+
+
+
+
+
+
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+GLOBAL_VALUES="helm/values.yaml"
+
+cpu_to_m() {
+  case "$1" in
+    *m) echo "${1%m}" ;;
+    ""|"null") echo 0 ;;
+    *) echo "$(echo "$1 * 1000" | bc)" ;;
+  esac
+}
+
+mem_to_mi() {
+  case "$1" in
+    *Gi) echo "$(echo "${1%Gi} * 1024" | bc)" ;;
+    *Mi) echo "${1%Mi}" ;;
+    ""|"null") echo 0 ;;
+    *) echo 0 ;;
+  esac
+}
+
+get_counts() {
+  local file="$1"
+  local comp="$2"
+
+  min=$(yq eval ".${comp}.autoscaling.hpa.minReplicas" "$file")
+  max=$(yq eval ".${comp}.autoscaling.hpa.maxReplicas" "$file")
+  replicas=$(yq eval ".${comp}.replicas" "$file")
+
+  [[ "$replicas" == "null" ]] && replicas=1
+
+  if [[ "$min" != "null" ]]; then
+    min_count=$min
+    [[ "$max" == "null" ]] && max=$min
+    max_count=$max
+  else
+    min_count=$replicas
+    max_count=$replicas
+  fi
+
+  echo "$min_count $max_count"
+}
+
+process_component() {
+  local file="$1"
+  local comp="$2"
+
+  enabled=$(yq eval ".${comp}.enabled // \"true\"" "$file")
+  if [[ "$enabled" == "false" ]]; then
+    return
+  fi
+
+  cpu=$(yq eval ".${comp}.resources.requests.cpu // \"0\"" "$file")
+  mem=$(yq eval ".${comp}.resources.requests.memory // \"0\"" "$file")
+
+  read min_count max_count <<< "$(get_counts "$file" "$comp")"
+
+  cpu_m=$(cpu_to_m "$cpu")
+  mem_mi=$(mem_to_mi "$mem")
+
+  min_cpu=$(echo "$cpu_m * $min_count" | bc)
+  min_mem=$(echo "$mem_mi * $min_count" | bc)
+
+  max_cpu=$(echo "$cpu_m * $max_count" | bc)
+  max_mem=$(echo "$mem_mi * $max_count" | bc)
+
+  printf "%-12s | pod: %4sm / %4sMi | pods(min/max): %2s/%2s | total(min): %6sm / %6sMi | total(max): %6sm / %6sMi\n" \
+    "$comp" "$cpu_m" "$mem_mi" "$min_count" "$max_count" "$min_cpu" "$min_mem" "$max_cpu" "$max_mem"
+}
+
+process_env() {
+  local ENV="$1"
+
+  echo ""
+  echo "================ ENV: $ENV ================"
+
+  for instance in instances/$ENV/*; do
+    echo ""
+    echo "INSTANCE: $(basename "$instance")"
+    echo "------------------------------------------------------------"
+
+    TMP=$(mktemp)
+
+    yq eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' \
+      "$GLOBAL_VALUES" "$instance/values.yaml" > "$TMP"
+
+    # composants principaux
+    for comp in server repoServer controller dex; do
+      process_component "$TMP" "$comp"
+    done
+
+    # redis
+    process_component "$TMP" "redis"
+
+    # ha
+    ha_enabled=$(yq eval '.ha.enabled // "false"' "$TMP")
+    if [[ "$ha_enabled" == "true" ]]; then
+      process_component "$TMP" "ha"
+    fi
+
+    rm -f "$TMP"
+  done
+}
+
+process_env "nprd"
+process_env "prod"
