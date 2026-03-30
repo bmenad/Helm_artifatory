@@ -137,12 +137,9 @@ server:
 
 
 
+#!/usr/bin/env bash
 
-
-
-
-
-#!/bin/bash
+set -euo pipefail
 
 GLOBAL_VALUES="helm/values.yaml"
 
@@ -156,24 +153,31 @@ TOTAL_PROD_CPU=0
 TOTAL_PROD_MEM=0
 
 cpu_to_m() {
-  [[ $1 == *m ]] && echo ${1%m} || echo "$(echo "$1 * 1000" | bc)"
+  case "$1" in
+    *m) echo "${1%m}" ;;
+    "") echo 0 ;;
+    *) echo "$(echo "$1 * 1000" | bc)" ;;
+  esac
 }
 
 mem_to_mi() {
-  [[ $1 == *Gi ]] && echo "$(echo "${1%Gi} * 1024" | bc)" \
-  || [[ $1 == *Mi ]] && echo "${1%Mi}" \
-  || echo 0
+  case "$1" in
+    *Gi) echo "$(echo "${1%Gi} * 1024" | bc)" ;;
+    *Mi) echo "${1%Mi}" ;;
+    "") echo 0 ;;
+    *) echo 0 ;;
+  esac
 }
 
 process_component() {
-  local file=$1
-  local path=$2
+  local file="$1"
+  local component="$2"
 
-  cpu=$(yq eval "$path.resources.requests.cpu // \"0\"" "$file")
-  mem=$(yq eval "$path.resources.requests.memory // \"0\"" "$file")
+  cpu=$(yq eval ".${component}.resources.requests.cpu // \"0\"" "$file")
+  mem=$(yq eval ".${component}.resources.requests.memory // \"0\"" "$file")
 
-  minReplicas=$(yq eval "$path.autoscaling.hpa.minReplicas" "$file")
-  replicas=$(yq eval "$path.replicas" "$file")
+  minReplicas=$(yq eval ".${component}.autoscaling.hpa.minReplicas" "$file")
+  replicas=$(yq eval ".${component}.replicas" "$file")
 
   [[ "$replicas" == "null" ]] && replicas=1
 
@@ -186,11 +190,14 @@ process_component() {
   cpu_m=$(cpu_to_m "$cpu")
   mem_mi=$(mem_to_mi "$mem")
 
-  echo "$cpu_m $mem_mi $count"
+  comp_cpu=$(echo "$cpu_m * $count" | bc)
+  comp_mem=$(echo "$mem_mi * $count" | bc)
+
+  echo "$count $comp_cpu $comp_mem"
 }
 
 process_env() {
-  local ENV=$1
+  local ENV="$1"
 
   echo ""
   echo "========= ENV: $ENV ========="
@@ -202,26 +209,24 @@ process_env() {
 
     TMP=$(mktemp)
 
+    # Merge Helm values
     yq eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' \
       "$GLOBAL_VALUES" "$instance/values.yaml" > "$TMP"
 
-    for comp in ".server" ".repoServer" ".controller"; do
-      read cpu mem count <<< $(process_component "$TMP" "$comp")
+    for comp in "server" "repoServer" "controller"; do
+      read count cpu mem <<< "$(process_component "$TMP" "$comp")"
 
-      comp_cpu=$(echo "$cpu * $count" | bc)
-      comp_mem=$(echo "$mem * $count" | bc)
+      printf "%-12s | %2s pods | %6sm CPU | %6sMi MEM\n" "$comp" "$count" "$cpu" "$mem"
 
-      printf "%-12s | %2s pods | %6sm CPU | %6sMi MEM\n" "$comp" "$count" "$comp_cpu" "$comp_mem"
-
-      TOTAL_CPU=$(echo "$TOTAL_CPU + $comp_cpu" | bc)
-      TOTAL_MEM=$(echo "$TOTAL_MEM + $comp_mem" | bc)
+      TOTAL_CPU=$(echo "$TOTAL_CPU + $cpu" | bc)
+      TOTAL_MEM=$(echo "$TOTAL_MEM + $mem" | bc)
 
       if [[ "$ENV" == "nprd" ]]; then
-        TOTAL_NPRD_CPU=$(echo "$TOTAL_NPRD_CPU + $comp_cpu" | bc)
-        TOTAL_NPRD_MEM=$(echo "$TOTAL_NPRD_MEM + $comp_mem" | bc)
+        TOTAL_NPRD_CPU=$(echo "$TOTAL_NPRD_CPU + $cpu" | bc)
+        TOTAL_NPRD_MEM=$(echo "$TOTAL_NPRD_MEM + $mem" | bc)
       else
-        TOTAL_PROD_CPU=$(echo "$TOTAL_PROD_CPU + $comp_cpu" | bc)
-        TOTAL_PROD_MEM=$(echo "$TOTAL_PROD_MEM + $comp_mem" | bc)
+        TOTAL_PROD_CPU=$(echo "$TOTAL_PROD_CPU + $cpu" | bc)
+        TOTAL_PROD_MEM=$(echo "$TOTAL_PROD_MEM + $mem" | bc)
       fi
     done
 
@@ -236,14 +241,16 @@ process_env "prod"
 
 echo ""
 echo "============== TOTAL ==================="
+echo "NPRD CPU: ${TOTAL_NPRD_CPU}m ($(echo "$TOTAL_NPRD_CPU/1000" | bc -l) cores)"
+echo "NPRD MEM: ${TOTAL_NPRD_MEM}Mi ($(echo "$TOTAL_NPRD_MEM/1024" | bc -l) Gi)"
 
-echo "NPRD  CPU: ${TOTAL_NPRD_CPU}m ($(echo "$TOTAL_NPRD_CPU/1000" | bc -l) cores)"
-echo "NPRD  MEM: ${TOTAL_NPRD_MEM}Mi ($(echo "$TOTAL_NPRD_MEM/1024" | bc -l) Gi)"
-
-echo "PROD  CPU: ${TOTAL_PROD_CPU}m ($(echo "$TOTAL_PROD_CPU/1000" | bc -l) cores)"
-echo "PROD  MEM: ${TOTAL_PROD_MEM}Mi ($(echo "$TOTAL_PROD_MEM/1024" | bc -l) Gi)"
+echo "PROD CPU: ${TOTAL_PROD_CPU}m ($(echo "$TOTAL_PROD_CPU/1000" | bc -l) cores)"
+echo "PROD MEM: ${TOTAL_PROD_MEM}Mi ($(echo "$TOTAL_PROD_MEM/1024" | bc -l) Gi)"
 
 echo "----------------------------------------"
 echo "TOTAL CPU: ${TOTAL_CPU}m ($(echo "$TOTAL_CPU/1000" | bc -l) cores)"
 echo "TOTAL MEM: ${TOTAL_MEM}Mi ($(echo "$TOTAL_MEM/1024" | bc -l) Gi)"
+
+
+
 
