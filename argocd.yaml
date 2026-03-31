@@ -1,0 +1,91 @@
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: argocd
+  namespace: {{ .Values.namespace }}
+
+{{- $size := .Values.size | default "xs" }}
+{{- $sizes := .Values.sizes }}
+{{- $cfg := index $sizes $size }}
+{{- $overrides := .Values.overrides | default dict }}
+
+spec:
+
+  {{- with .Values.extraConfig }}
+  extraConfig:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  ## ---------------------------
+  ## Controller
+  ## ---------------------------
+  controller:
+    appSync: {{ .Values.controller.appSync | default "10m" | quote }}
+    parallelismLimit: {{ .Values.controller.parallelismLimit | default 10 }}
+    processors:
+      operation: {{ .Values.controller.processors.operation | default 25 }}
+      status: {{ .Values.controller.processors.status | default 50 }}
+
+    {{ include "argocd.resources" (dict 
+      "cfg" $cfg 
+      "component" "controller" 
+      "overrides" $overrides
+    ) | nindent 4 }}
+
+    sharding:
+      {{- toYaml $cfg.controller.sharding | nindent 6 }}
+
+    {{- $env := concat (.Values.controller.baseEnv | default list) (.Values.controller.extraEnv | default list) }}
+    {{- with $env }}
+    env:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+
+  ## ---------------------------
+  ## Repo Server
+  ## ---------------------------
+  repo:
+    {{- if .Values.repoServer.parallelismLimit }}
+    extraRepoCommandArgs:
+      - --parallelism-limit={{ .Values.repoServer.parallelismLimit }}
+    {{- end }}
+
+    {{ include "argocd.resources" (dict 
+      "cfg" $cfg 
+      "component" "reposerver" 
+      "overrides" $overrides
+    ) | nindent 4 }}
+
+    replicas: {{ $cfg.repo.replicas | default 1 }}
+
+  ## ---------------------------
+  ## Server
+  ## ---------------------------
+  server:
+    replicas: {{ $cfg.server.replicas | default 1 }}
+
+    {{ include "argocd.resources" (dict 
+      "cfg" $cfg 
+      "component" "server" 
+      "overrides" $overrides
+    ) | nindent 4 }}
+
+  ## ---------------------------
+  ## Redis
+  ## ---------------------------
+  redis:
+    {{ include "argocd.resources" (dict 
+      "cfg" $cfg 
+      "component" "redis" 
+      "overrides" $overrides
+    ) | nindent 4 }}
+
+  ## ---------------------------
+  ## Dex
+  ## ---------------------------
+  dex:
+    {{ include "argocd.resources" (dict 
+      "cfg" $cfg 
+      "component" "dex" 
+      "overrides" $overrides
+    ) | nindent 4 }}
