@@ -24,12 +24,27 @@
 {{- $req := merge $baseReq $ovrReq }}
 {{- $lim := merge $baseLim $ovrLim }}
 
+{{- if or $req $lim }}
 resources:
+  {{- if $req }}
   requests:
-    cpu: {{ $req.cpu | default "" | quote }}
-    memory: {{ $req.memory | default "" | quote }}
+    {{- if $req.cpu }}
+    cpu: {{ $req.cpu | quote }}
+    {{- end }}
+    {{- if $req.memory }}
+    memory: {{ $req.memory | quote }}
+    {{- end }}
+  {{- end }}
+
+  {{- if $lim }}
   limits:
-    cpu: {{ $lim.cpu | default "" | quote }}
-    memory: {{ $lim.memory | default "" | quote }}
+    {{- if $lim.cpu }}
+    cpu: {{ $lim.cpu | quote }}
+    {{- end }}
+    {{- if $lim.memory }}
+    memory: {{ $lim.memory | quote }}
+    {{- end }}
+  {{- end }}
+{{- end }}
 
 {{- end }}
