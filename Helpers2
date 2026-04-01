@@ -1,0 +1,21 @@
+{{- define "argocd.resources" -}}
+{{- $root := index . 0 -}}
+{{- $comp := index . 1 -}}
+
+{{- $sizeName := $root.Values.size | default "xs" -}}
+{{- $sizes := $root.Values.sizes | default dict -}}
+{{- $overrides := $root.Values.overrides | default dict -}}
+
+{{- $sizeCfg := index $sizes $sizeName | default dict -}}
+
+# 👇 IMPORTANT : on récupère AUSSI les values natifs
+{{- $valuesComp := index $root.Values $comp | default dict -}}
+
+{{- $base := index $valuesComp "resources" | default dict -}}
+{{- $size := index (index $sizeCfg $comp | default dict) "resources" | default dict -}}
+{{- $over := index (index $overrides $comp | default dict) "resources" | default dict -}}
+
+{{- $merged := mergeOverwrite (deepCopy $base) $size $over -}}
+
+{{- toYaml $merged -}}
+{{- end -}}
