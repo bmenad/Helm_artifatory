@@ -1,6 +1,6 @@
 {{/*
-Merge ONLY resources for a component:
-Priority: defaults < sizes < overrides
+Merge ONLY resources:
+Priority: base (.Values.<comp>) < sizes < overrides
 */}}
 {{- define "argocd.resources" -}}
 {{- $root := index . 0 -}}
@@ -14,14 +14,18 @@ Priority: defaults < sizes < overrides
 {{- end -}}
 
 {{- $sizeCfg := index $sizes $sizeName | default dict -}}
-{{- $defaults := $root.Values.defaults | default dict -}}
 {{- $overrides := $root.Values.overrides | default dict -}}
 
-{{- $def := index $defaults $comp "resources" | default dict -}}
-{{- $size := index $sizeCfg $comp "resources" | default dict -}}
-{{- $ovr := index $overrides $comp "resources" | default dict -}}
+{{- /* base = valeurs globales */ -}}
+{{- $baseComp := index $root.Values $comp | default dict -}}
+{{- $sizeComp := index $sizeCfg $comp | default dict -}}
+{{- $ovrComp := index $overrides $comp | default dict -}}
 
-{{- $merged := mergeOverwrite (deepCopy $def) $size $ovr -}}
+{{- $base := index $baseComp "resources" | default dict -}}
+{{- $size := index $sizeComp "resources" | default dict -}}
+{{- $ovr := index $ovrComp "resources" | default dict -}}
+
+{{- $merged := mergeOverwrite (deepCopy $base) $size $ovr -}}
 
 {{- toYaml $merged -}}
 {{- end -}}
