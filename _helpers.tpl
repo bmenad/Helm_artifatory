@@ -1,13 +1,9 @@
-{{/*
-Helper générique pour merger les resources (base size + override)
-*/}}
 {{- define "argocd.resources" -}}
 
 {{- $cfg := .cfg }}
 {{- $component := .component }}
 {{- $overrides := .overrides | default dict }}
 
-{{- /* mapping si repo vs reposerver */}}
 {{- $compKey := $component }}
 {{- if eq $component "reposerver" }}
   {{- $compKey = "repo" }}
@@ -16,8 +12,17 @@ Helper générique pour merger les resources (base size + override)
 {{- $base := index $cfg $compKey | default dict }}
 {{- $ovr := index $overrides $component | default dict }}
 
-{{- $req := merge ($base.resources.requests | default dict) ($ovr.resources.requests | default dict) }}
-{{- $lim := merge ($base.resources.limits | default dict) ($ovr.resources.limits | default dict) }}
+{{- $baseRes := $base.resources | default dict }}
+{{- $ovrRes := $ovr.resources | default dict }}
+
+{{- $baseReq := $baseRes.requests | default dict }}
+{{- $baseLim := $baseRes.limits | default dict }}
+
+{{- $ovrReq := $ovrRes.requests | default dict }}
+{{- $ovrLim := $ovrRes.limits | default dict }}
+
+{{- $req := merge $baseReq $ovrReq }}
+{{- $lim := merge $baseLim $ovrLim }}
 
 resources:
   requests:
