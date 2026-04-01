@@ -6,6 +6,10 @@ controller:
     operation: {{ .Values.controller.processors.operation | default 25 }}
     status: {{ .Values.controller.processors.status | default 50 }}
 
+  {{- with .Values.controller }}
+  {{- toYaml (omit . "resources") | nindent 2 }}
+  {{- end }}
+
   {{- with $cfg.controller }}
   {{- toYaml (omit . "resources") | nindent 2 }}
   {{- end }}
@@ -19,7 +23,11 @@ controller:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 
-  repo:
+repo:
+  {{- with .Values.repoServer }}
+  {{- toYaml (omit . "resources") | nindent 2 }}
+  {{- end }}
+
   {{- with $cfg.repoServer }}
   {{- toYaml (omit . "resources") | nindent 2 }}
   {{- end }}
@@ -31,4 +39,41 @@ controller:
   extraRepoCommandArgs:
     - --parallelism-limit={{ .Values.repoServer.parallelismLimit }}
   {{- end }}
+
+  server:
+  {{- with .Values.server }}
+  {{- toYaml (omit . "resources") | nindent 2 }}
+  {{- end }}
+
+  {{- with $cfg.server }}
+  {{- toYaml (omit . "resources") | nindent 2 }}
+  {{- end }}
+
+  resources:
+    {{- include "argocd.resources" (list . "server") | nindent 4 }}
+
+    dex:
+  {{- with .Values.dex }}
+  {{- toYaml (omit . "resources") | nindent 2 }}
+  {{- end }}
+
+  {{- with $cfg.dex }}
+  {{- toYaml (omit . "resources") | nindent 2 }}
+  {{- end }}
+
+  resources:
+    {{- include "argocd.resources" (list . "dex") | nindent 4 }}
+
+
+    redis:
+  {{- with .Values.redis }}
+  {{- toYaml (omit . "resources") | nindent 2 }}
+  {{- end }}
+
+  {{- with $cfg.redis }}
+  {{- toYaml (omit . "resources") | nindent 2 }}
+  {{- end }}
+
+  resources:
+    {{- include "argocd.resources" (list . "redis") | nindent 4 }}
   
