@@ -27,10 +27,11 @@ spec:
       status: {{ .Values.controller.processors.status | default 50 }}
 
     {{ include "argocd.resources" (dict 
-      "cfg" $cfg 
-      "component" "controller" 
-      "overrides" $overrides
-    ) | nindent 4 }}
+  "cfg" $cfg 
+  "values" .Values
+  "component" "dex"
+  "overrides" $overrides
+) }}
 
     sharding:
       {{- toYaml $cfg.controller.sharding | nindent 6 }}
