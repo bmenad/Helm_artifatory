@@ -1,65 +1,27 @@
+{{/*
+Merge ONLY resources for a component:
+Priority: defaults < sizes < overrides
+*/}}
 {{- define "argocd.resources" -}}
+{{- $root := index . 0 -}}
+{{- $comp := index . 1 -}}
 
-{{- $cfg := .cfg }}
-{{- $component := .component }}
-{{- $values := .values }}
-{{- $overrides := .overrides | default dict }}
+{{- $sizeName := $root.Values.size | default "xs" -}}
+{{- $sizes := $root.Values.sizes | default dict -}}
 
-{{- $compKey := $component }}
-{{- if eq $component "reposerver" }}
-  {{- $compKey = "repo" }}
-{{- end }}
+{{- if not (hasKey $sizes $sizeName) -}}
+{{- fail (printf "Invalid size '%s'. Available sizes: %s" $sizeName (keys $sizes | join ", ")) -}}
+{{- end -}}
 
-{{/* =========================
-   BASE PRIORITY:
-   sizes > values global
-========================= */}}
+{{- $sizeCfg := index $sizes $sizeName | default dict -}}
+{{- $defaults := $root.Values.defaults | default dict -}}
+{{- $overrides := $root.Values.overrides | default dict -}}
 
-{{- $base := dict }}
+{{- $def := index $defaults $comp "resources" | default dict -}}
+{{- $size := index $sizeCfg $comp "resources" | default dict -}}
+{{- $ovr := index $overrides $comp "resources" | default dict -}}
 
-{{- if hasKey $cfg $compKey }}
-  {{- $base = index $cfg $compKey }}
-{{- else if hasKey $values $component }}
-  {{- $base = index $values $component }}
-{{- end }}
+{{- $merged := mergeOverwrite (deepCopy $def) $size $ovr -}}
 
-{{- $ovr := index $overrides $component | default dict }}
-
-{{- $baseRes := $base.resources | default dict }}
-{{- $ovrRes := $ovr.resources | default dict }}
-
-{{- $baseReq := $baseRes.requests | default dict }}
-{{- $baseLim := $baseRes.limits | default dict }}
-
-{{- $ovrReq := $ovrRes.requests | default dict }}
-{{- $ovrLim := $ovrRes.limits | default dict }}
-
-{{- $req := merge $baseReq $ovrReq }}
-{{- $lim := merge $baseLim $ovrLim }}
-
-{{- if or $req $lim }}
-resources:
-
-  {{- if $req }}
-  requests:
-    {{- if $req.cpu }}
-    cpu: {{ $req.cpu | quote }}
-    {{- end }}
-    {{- if $req.memory }}
-    memory: {{ $req.memory | quote }}
-    {{- end }}
-  {{- end }}
-
-  {{- if $lim }}
-  limits:
-    {{- if $lim.cpu }}
-    cpu: {{ $lim.cpu | quote }}
-    {{- end }}
-    {{- if $lim.memory }}
-    memory: {{ $lim.memory | quote }}
-    {{- end }}
-  {{- end }}
-
-{{- end }}
-
-{{- end }}
+{{- toYaml $merged -}}
+{{- end -}}
