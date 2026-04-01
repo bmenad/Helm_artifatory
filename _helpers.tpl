@@ -2,6 +2,7 @@
 
 {{- $cfg := .cfg }}
 {{- $component := .component }}
+{{- $values := .values }}
 {{- $overrides := .overrides | default dict }}
 
 {{- $compKey := $component }}
@@ -9,7 +10,19 @@
   {{- $compKey = "repo" }}
 {{- end }}
 
-{{- $base := index $cfg $compKey | default dict }}
+{{/* =========================
+   BASE PRIORITY:
+   sizes > values global
+========================= */}}
+
+{{- $base := dict }}
+
+{{- if hasKey $cfg $compKey }}
+  {{- $base = index $cfg $compKey }}
+{{- else if hasKey $values $component }}
+  {{- $base = index $values $component }}
+{{- end }}
+
 {{- $ovr := index $overrides $component | default dict }}
 
 {{- $baseRes := $base.resources | default dict }}
@@ -26,6 +39,7 @@
 
 {{- if or $req $lim }}
 resources:
+
   {{- if $req }}
   requests:
     {{- if $req.cpu }}
@@ -45,6 +59,7 @@ resources:
     memory: {{ $lim.memory | quote }}
     {{- end }}
   {{- end }}
+
 {{- end }}
 
 {{- end }}
