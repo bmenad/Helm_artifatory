@@ -1,3 +1,6 @@
+{{- printf "DEX ROOT = %v" .Values.dex | fail }}
+{{- printf "DEX SSO = %v" .Values.configs.sso.dex | fail }}
+
 {{/*
 Merge resources for a component
 Priority: base < size < overrides
