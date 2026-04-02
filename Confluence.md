@@ -221,7 +221,8 @@ Priorité d’application :
 | XL     | 1       | 3       | 2Gi     | 4Gi     |
 
 ---
-
+🧱 Redis
+🔐 Dex
 ## 🚀 5. Implémentation
 
 ```bash
