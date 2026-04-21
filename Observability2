@@ -1,12 +1,13 @@
 #!/bin/bash
-
 set -euo pipefail
 
-ROOT_DIR="${1:-instances}"
+ROOT="${1:-instances}"
+CHART="./helm"
+BASE_VALUES="helm/values.yaml"
 
 # -------- helpers --------
 to_mcpu() {
-  local v="$1"
+  local v="${1:-0}"
   [[ -z "$v" ]] && echo 0 && return
   if [[ "$v" == *m ]]; then
     echo "${v%m}"
@@ -16,100 +17,145 @@ to_mcpu() {
 }
 
 to_mi() {
-  local v="$1"
+  local v="${1:-0}"
   [[ -z "$v" ]] && echo 0 && return
   if [[ "$v" == *Gi ]]; then
     echo "$(echo "${v%Gi} * 1024" | bc)"
   elif [[ "$v" == *Mi ]]; then
     echo "${v%Mi}"
   else
-    echo "$v"
+    echo 0
   fi
 }
 
-get() {
-  yq "$1 // \"\"" "$2"
-}
-
-# -------- totals --------
+# -------- global totals --------
 GLOBAL_MIN_CPU=0
 GLOBAL_MAX_CPU=0
 GLOBAL_MIN_MEM=0
 GLOBAL_MAX_MEM=0
 
-echo "Scanning: $ROOT_DIR"
+echo "Rendering + scanning: $ROOT"
 echo ""
 
-find "$ROOT_DIR" -name values.yaml | while read -r FILE; do
+find "$ROOT" -name values.yaml | while read -r FILE; do
+
+  TMP=$(mktemp)
+
+  # -------- render Helm --------
+  helm template metaargo "$CHART" \
+    -f "$BASE_VALUES" \
+    -f "$FILE" \
+    > "$TMP"
 
   # -------- CONTROLLER --------
-  ctrl_cpu=$(get '.controller.resources.requests.cpu' "$FILE")
-  ctrl_mem=$(get '.controller.resources.requests.memory' "$FILE")
-
-  ctrl_rep=$(get '.controller.sharding.replicas' "$FILE")
-  [[ -z "$ctrl_rep" ]] && ctrl_rep=$(get '.controller.replicas' "$FILE")
-  [[ -z "$ctrl_rep" ]] && ctrl_rep=1
+  ctrl_cpu=$(yq '.spec.controller.resources.requests.cpu // ""' "$TMP")
+  ctrl_mem=$(yq '.spec.controller.resources.requests.memory // ""' "$TMP")
+  ctrl_rep=$(yq '.spec.controller.sharding.replicas // .spec.controller.replicas // 1' "$TMP")
 
   # -------- REPO --------
-  repo_cpu=$(get '.repoServer.resources.requests.cpu' "$FILE")
-  repo_mem=$(get '.repoServer.resources.requests.memory' "$FILE")
-  repo_rep=$(get '.repoServer.replicas' "$FILE")
-  [[ -z "$repo_rep" ]] && repo_rep=1
+  repo_cpu=$(yq '.spec.repo.resources.requests.cpu // ""' "$TMP")
+  repo_mem=$(yq '.spec.repo.resources.requests.memory // ""' "$TMP")
+  repo_rep=$(yq '.spec.repo.replicas // 1' "$TMP")
 
   # -------- SERVER --------
-  srv_cpu=$(get '.server.resources.requests.cpu' "$FILE")
-  srv_mem=$(get '.server.resources.requests.memory' "$FILE")
+  srv_cpu=$(yq '.spec.server.resources.requests.cpu // ""' "$TMP")
+  srv_mem=$(yq '.spec.server.resources.requests.memory // ""' "$TMP")
 
-  hpa_enabled=$(get '.server.autoscaling.enabled' "$FILE')
+  hpa_enabled=$(yq '.spec.server.autoscaling.enabled // false' "$TMP")
 
   if [[ "$hpa_enabled" == "true" ]]; then
-    srv_min=$(get '.server.autoscaling.hpa.minReplicas' "$FILE")
-    srv_max=$(get '.server.autoscaling.hpa.maxReplicas' "$FILE")
+    srv_min=$(yq '.spec.server.autoscaling.hpa.minReplicas // 1' "$TMP")
+    srv_max=$(yq '.spec.server.autoscaling.hpa.maxReplicas // 1' "$TMP")
   else
-    srv_min=$(get '.server.replicas' "$FILE")
+    srv_min=$(yq '.spec.server.replicas // 1' "$TMP")
     srv_max="$srv_min"
   fi
 
-  [[ -z "$srv_min" ]] && srv_min=1
-  [[ -z "$srv_max" ]] && srv_max=1
+  # -------- DEX --------
+  dex_cpu=$(yq '.spec.dex.resources.requests.cpu // ""' "$TMP")
+  dex_mem=$(yq '.spec.dex.resources.requests.memory // ""' "$TMP")
+  dex_rep=1
+
+  # -------- REDIS (standalone) --------
+  redis_enabled=$(yq '.spec.redis.enabled // false' "$TMP")
+  if [[ "$redis_enabled" == "true" ]]; then
+    redis_cpu=$(yq '.spec.redis.resources.requests.cpu // ""' "$TMP")
+    redis_mem=$(yq '.spec.redis.resources.requests.memory // ""' "$TMP")
+    redis_rep=1
+  else
+    redis_cpu=0
+    redis_mem=0
+    redis_rep=0
+  fi
+
+  # -------- REDIS HA --------
+  redis_ha_enabled=$(yq '.spec.redisHa.enabled // false' "$TMP")
+
+  if [[ "$redis_ha_enabled" == "true" ]]; then
+    ha_cpu=$(yq '.spec.redisHa.resources.requests.cpu // ""' "$TMP")
+    ha_mem=$(yq '.spec.redisHa.resources.requests.memory // ""' "$TMP")
+    ha_rep=$(yq '.spec.redisHa.replicas // 3' "$TMP")
+
+    haproxy_cpu=$(yq '.spec.redisHa.haproxy.resources.requests.cpu // ""' "$TMP")
+    haproxy_mem=$(yq '.spec.redisHa.haproxy.resources.requests.memory // ""' "$TMP")
+    haproxy_rep=$(yq '.spec.redisHa.haproxy.replicas // 1' "$TMP")
+  else
+    ha_cpu=0; ha_mem=0; ha_rep=0
+    haproxy_cpu=0; haproxy_mem=0; haproxy_rep=0
+  fi
 
   # -------- convert --------
   ctrl_cpu_m=$(to_mcpu "$ctrl_cpu")
-  ctrl_mem_mi=$(to_mi "$ctrl_mem")
-
   repo_cpu_m=$(to_mcpu "$repo_cpu")
-  repo_mem_mi=$(to_mi "$repo_mem")
-
   srv_cpu_m=$(to_mcpu "$srv_cpu")
+  dex_cpu_m=$(to_mcpu "$dex_cpu")
+  redis_cpu_m=$(to_mcpu "$redis_cpu")
+  ha_cpu_m=$(to_mcpu "$ha_cpu")
+  haproxy_cpu_m=$(to_mcpu "$haproxy_cpu")
+
+  ctrl_mem_mi=$(to_mi "$ctrl_mem")
+  repo_mem_mi=$(to_mi "$repo_mem")
   srv_mem_mi=$(to_mi "$srv_mem")
+  dex_mem_mi=$(to_mi "$dex_mem")
+  redis_mem_mi=$(to_mi "$redis_mem")
+  ha_mem_mi=$(to_mi "$ha_mem")
+  haproxy_mem_mi=$(to_mi "$haproxy_mem")
 
-  # -------- totals per instance --------
-  MIN_CPU=$(( ctrl_cpu_m*ctrl_rep + repo_cpu_m*repo_rep + srv_cpu_m*srv_min ))
-  MAX_CPU=$(( ctrl_cpu_m*ctrl_rep + repo_cpu_m*repo_rep + srv_cpu_m*srv_max ))
+  # -------- totals --------
+  MIN_CPU=$(( ctrl_cpu_m*ctrl_rep + repo_cpu_m*repo_rep + srv_cpu_m*srv_min \
+            + dex_cpu_m*dex_rep + redis_cpu_m*redis_rep \
+            + ha_cpu_m*ha_rep + haproxy_cpu_m*haproxy_rep ))
 
-  MIN_MEM=$(( ctrl_mem_mi*ctrl_rep + repo_mem_mi*repo_rep + srv_mem_mi*srv_min ))
-  MAX_MEM=$(( ctrl_mem_mi*ctrl_rep + repo_mem_mi*repo_rep + srv_mem_mi*srv_max ))
+  MAX_CPU=$(( ctrl_cpu_m*ctrl_rep + repo_cpu_m*repo_rep + srv_cpu_m*srv_max \
+            + dex_cpu_m*dex_rep + redis_cpu_m*redis_rep \
+            + ha_cpu_m*ha_rep + haproxy_cpu_m*haproxy_rep ))
 
-  # -------- print instance --------
-  echo "----------------------------------------"
+  MIN_MEM=$(( ctrl_mem_mi*ctrl_rep + repo_mem_mi*repo_rep + srv_mem_mi*srv_min \
+            + dex_mem_mi*dex_rep + redis_mem_mi*redis_rep \
+            + ha_mem_mi*ha_rep + haproxy_mem_mi*haproxy_rep ))
+
+  MAX_MEM=$(( ctrl_mem_mi*ctrl_rep + repo_mem_mi*repo_rep + srv_mem_mi*srv_max \
+            + dex_mem_mi*dex_rep + redis_mem_mi*redis_rep \
+            + ha_mem_mi*ha_rep + haproxy_mem_mi*haproxy_rep ))
+
+  echo "------------------------------------------"
   echo "Instance: $FILE"
   printf "CPU  min/max: %6sm / %6sm\n" "$MIN_CPU" "$MAX_CPU"
   printf "MEM  min/max: %6sMi / %6sMi\n" "$MIN_MEM" "$MAX_MEM"
 
-  # -------- accumulate --------
   GLOBAL_MIN_CPU=$((GLOBAL_MIN_CPU + MIN_CPU))
   GLOBAL_MAX_CPU=$((GLOBAL_MAX_CPU + MAX_CPU))
-
   GLOBAL_MIN_MEM=$((GLOBAL_MIN_MEM + MIN_MEM))
   GLOBAL_MAX_MEM=$((GLOBAL_MAX_MEM + MAX_MEM))
+
+  rm -f "$TMP"
 
 done
 
 echo ""
-echo "============== GLOBAL =============="
+echo "============= GLOBAL ============="
 printf "CPU MIN: %sm (%.2f cores)\n" "$GLOBAL_MIN_CPU" "$(echo "$GLOBAL_MIN_CPU/1000" | bc -l)"
 printf "CPU MAX: %sm (%.2f cores)\n" "$GLOBAL_MAX_CPU" "$(echo "$GLOBAL_MAX_CPU/1000" | bc -l)"
-
 printf "MEM MIN: %s Mi (%.2f Gi)\n" "$GLOBAL_MIN_MEM" "$(echo "$GLOBAL_MIN_MEM/1024" | bc -l)"
 printf "MEM MAX: %s Mi (%.2f Gi)\n" "$GLOBAL_MAX_MEM" "$(echo "$GLOBAL_MAX_MEM/1024" | bc -l)"
-echo "===================================="
+echo "================================="
