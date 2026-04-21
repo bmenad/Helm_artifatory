@@ -26,16 +26,20 @@ mem_to_mi() {
   esac
 }
 
-# 🔥 mapping logique chart → values
+# 🔥 mapping vers spec + cas spéciaux
 map_component() {
   case "$1" in
-    repoServer) echo "repo" ;;
-    dex) echo "sso.dex" ;;
-    *) echo "$1" ;;
+    repoServer) echo "spec.repo" ;;
+    dex) echo "spec.sso.dex" ;;
+    server) echo "spec.server" ;;
+    controller) echo "spec.controller" ;;
+    redis) echo "spec.redis" ;;
+    ha) echo "spec.ha" ;;
+    *) echo "spec.$1" ;;
   esac
 }
 
-# 🔥 RÉCUPÉRATION RESOURCES AVEC RESIZING
+# 🔥 LOGIQUE RESIZING (override > size > base)
 get_resources() {
   local file="$1"
   local comp="$2"
@@ -166,7 +170,7 @@ process_env() {
       process_component "$TMP" "$comp"
     done
 
-    ha_enabled=$(yq eval '.ha.enabled // "false"' "$TMP")
+    ha_enabled=$(yq eval '.spec.ha.enabled // "false"' "$TMP")
     if [[ "$ha_enabled" == "true" ]]; then
       process_component "$TMP" "ha"
     fi
