@@ -5,27 +5,30 @@ ROOT="${1:-instances}"
 CHART="./helm"
 BASE_VALUES="helm/values.yaml"
 
-# -------- helpers (NO FLOATS) --------
+# -------- SAFE CONVERSIONS --------
+
 to_mcpu() {
   local v="${1:-0}"
+
   [[ -z "$v" || "$v" == "null" ]] && echo 0 && return
 
   if [[ "$v" == *m ]]; then
     echo "${v%m}"
   else
-    # ex: 2 -> 2000
-    echo "$(( v * 1000 ))"
+    # gère float type 1.5
+    echo "$v" | awk '{printf "%d", $1 * 1000}'
   fi
 }
 
 to_mi() {
   local v="${1:-0}"
+
   [[ -z "$v" || "$v" == "null" ]] && echo 0 && return
 
   if [[ "$v" == *Gi ]]; then
-    echo "$(( ${v%Gi} * 1024 ))"
+    echo "${v%Gi}" | awk '{printf "%d", $1 * 1024}'
   elif [[ "$v" == *Mi ]]; then
-    echo "${v%Mi}"
+    echo "${v%Mi}" | awk '{printf "%d", $1}'
   else
     echo 0
   fi
@@ -35,7 +38,8 @@ get() {
   yq "$1 // \"\"" "$2"
 }
 
-# -------- global totals --------
+# -------- GLOBAL --------
+
 GLOBAL_MIN_CPU=0
 GLOBAL_MAX_CPU=0
 GLOBAL_MIN_MEM=0
@@ -48,7 +52,6 @@ find "$ROOT" -name values.yaml | while read -r FILE; do
 
   TMP=$(mktemp)
 
-  # -------- render Helm --------
   helm template metaargo "$CHART" \
     -f "$BASE_VALUES" \
     -f "$FILE" \
@@ -110,7 +113,7 @@ find "$ROOT" -name values.yaml | while read -r FILE; do
     haproxy_cpu=0; haproxy_mem=0; haproxy_rep=0
   fi
 
-  # -------- convert --------
+  # -------- CONVERSION --------
   ctrl_cpu_m=$(to_mcpu "$ctrl_cpu")
   repo_cpu_m=$(to_mcpu "$repo_cpu")
   srv_cpu_m=$(to_mcpu "$srv_cpu")
@@ -127,7 +130,7 @@ find "$ROOT" -name values.yaml | while read -r FILE; do
   ha_mem_mi=$(to_mi "$ha_mem")
   haproxy_mem_mi=$(to_mi "$haproxy_mem")
 
-  # -------- totals --------
+  # -------- TOTAL --------
   MIN_CPU=$(( ctrl_cpu_m*ctrl_rep + repo_cpu_m*repo_rep + srv_cpu_m*srv_min \
             + dex_cpu_m*dex_rep + redis_cpu_m*redis_rep \
             + ha_cpu_m*ha_rep + haproxy_cpu_m*haproxy_rep ))
