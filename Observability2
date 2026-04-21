@@ -26,6 +26,19 @@ mem_to_mi() {
   esac
 }
 
+# Mapping composants → noms k8s réels
+get_k8s_name() {
+  case "$1" in
+    server) echo "argocd-server" ;;
+    repoServer) echo "argocd-repo-server" ;;
+    controller) echo "argocd-application-controller" ;;
+    dex) echo "argocd-dex-server" ;;
+    redis) echo "argocd-redis" ;;
+    ha) echo "argocd-application-controller" ;;
+    *) echo "$1" ;;
+  esac
+}
+
 get_counts() {
   local file="$1"
   local comp="$2"
@@ -62,31 +75,43 @@ process_component() {
   enabled=$(yq eval ".${comp}.enabled // \"true\"" "$file")
   [[ "$enabled" == "false" ]] && return
 
-  # 🔥 Récupération réelle via Helm (prend sizing + overrides)
-  cpu_raw=$(echo "$RENDERED" | yq eval "
+  kname=$(get_k8s_name "$comp")
+
+  # 🔥 récupérer toutes les ressources des containers du composant
+  cpu_list=$(echo "$RENDERED" | yq eval "
     select(.kind == \"Deployment\" or .kind == \"StatefulSet\") 
-    | select(.metadata.name | test(\"$comp\")) 
+    | select(.metadata.name == \"$kname\") 
     | .spec.template.spec.containers[].resources.requests.cpu // \"0\"" -)
 
-  mem_raw=$(echo "$RENDERED" | yq eval "
+  mem_list=$(echo "$RENDERED" | yq eval "
     select(.kind == \"Deployment\" or .kind == \"StatefulSet\") 
-    | select(.metadata.name | test(\"$comp\")) 
+    | select(.metadata.name == \"$kname\") 
     | .spec.template.spec.containers[].resources.requests.memory // \"0\"" -)
 
-  # 🔥 Somme des containers (important pour redis, dex, sidecars...)
-  cpu_sum=$(echo "$cpu_raw" | sed 's/m//g' | awk '{s+=$1} END {print s+0}')
-  mem_sum=$(echo "$mem_raw" | sed 's/Mi//g' | sed 's/Gi/*1024/g' | awk '{s+=$1} END {print s+0}')
+  total_cpu_m=0
+  total_mem_mi=0
+
+  # somme des containers
+  for cpu in $cpu_list; do
+    val=$(cpu_to_m "$cpu")
+    total_cpu_m=$(echo "$total_cpu_m + $val" | bc)
+  done
+
+  for mem in $mem_list; do
+    val=$(mem_to_mi "$mem")
+    total_mem_mi=$(echo "$total_mem_mi + $val" | bc)
+  done
 
   read min_count max_count <<< "$(get_counts "$file" "$comp")"
 
-  min_cpu=$(echo "$cpu_sum * $min_count" | bc)
-  min_mem=$(echo "$mem_sum * $min_count" | bc)
+  min_cpu=$(echo "$total_cpu_m * $min_count" | bc)
+  min_mem=$(echo "$total_mem_mi * $min_count" | bc)
 
-  max_cpu=$(echo "$cpu_sum * $max_count" | bc)
-  max_mem=$(echo "$mem_sum * $max_count" | bc)
+  max_cpu=$(echo "$total_cpu_m * $max_count" | bc)
+  max_mem=$(echo "$total_mem_mi * $max_count" | bc)
 
   printf "%-12s | pod: %4sm / %4sMi | pods(min/max): %2s/%2s | total(min): %6sm / %6sMi | total(max): %6sm / %6sMi\n" \
-    "$comp" "$cpu_sum" "$mem_sum" "$min_count" "$max_count" "$min_cpu" "$min_mem" "$max_cpu" "$max_mem"
+    "$comp" "$total_cpu_m" "$total_mem_mi" "$min_count" "$max_count" "$min_cpu" "$min_mem" "$max_cpu" "$max_mem"
 
   TOTAL_MIN_CPU=$(echo "$TOTAL_MIN_CPU + $min_cpu" | bc)
   TOTAL_MIN_MEM=$(echo "$TOTAL_MIN_MEM + $min_mem" | bc)
@@ -121,7 +146,6 @@ process_env() {
 
     TMP=$(mktemp)
 
-    # 🔥 Merge values comme avant
     if [[ "$INSTANCE_NAME" == "meta" ]]; then
       cp "$instance/values.yaml" "$TMP"
     else
@@ -129,7 +153,7 @@ process_env() {
         "$GLOBAL_VALUES" "$instance/values.yaml" > "$TMP"
     fi
 
-    # 🔥 Rendu Helm UNE seule fois
+    # 🔥 rendu helm (source de vérité)
     RENDERED=$(helm template test helm -f "$TMP")
 
     for comp in server repoServer controller dex; do
@@ -151,7 +175,6 @@ process_env() {
   done
 }
 
-# execution
 for env in "${ENVS[@]}"; do
   process_env "$env"
 done
