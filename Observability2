@@ -26,22 +26,18 @@ mem_to_mi() {
   esac
 }
 
-# 🔥 NOUVELLE LOGIQUE compatible old + new chart
+# 🔥 NOUVELLE LOGIQUE : override > size > base
 get_resources() {
   local file="$1"
   local comp="$2"
 
-  # size (nouvelle chart)
   size=$(yq eval ".${comp}.size // \"null\"" "$file")
 
-  # base (ancienne chart + fallback)
-  base_cpu=$(yq eval ".${comp}.resources.requests.cpu // \"null\"" "$file")
-  base_mem=$(yq eval ".${comp}.resources.requests.memory // \"null\"" "$file")
+  # base
+  cpu=$(yq eval ".${comp}.resources.requests.cpu // \"null\"" "$file")
+  mem=$(yq eval ".${comp}.resources.requests.memory // \"null\"" "$file")
 
-  cpu="$base_cpu"
-  mem="$base_mem"
-
-  # size layer (nouvelle chart)
+  # size
   if [[ "$size" != "null" ]]; then
     size_cpu=$(yq eval ".sizes.${size}.${comp}.resources.requests.cpu // \"null\"" "$file")
     size_mem=$(yq eval ".sizes.${size}.${comp}.resources.requests.memory // \"null\"" "$file")
@@ -50,7 +46,7 @@ get_resources() {
     [[ "$size_mem" != "null" ]] && mem="$size_mem"
   fi
 
-  # override explicite (priorité max)
+  # override explicite (déjà mergé par helm normalement)
   override_cpu=$(yq eval ".${comp}.resources.requests.cpu // \"null\"" "$file")
   override_mem=$(yq eval ".${comp}.resources.requests.memory // \"null\"" "$file")
 
@@ -96,9 +92,7 @@ process_component() {
   enabled=$(yq eval ".${comp}.enabled // \"true\"" "$file")
   [[ "$enabled" == "false" ]] && return
 
-  # 🔥 ICI ON UTILISE LA NOUVELLE FONCTION
   read cpu mem <<< "$(get_resources "$file" "$comp")"
-
   read min_count max_count <<< "$(get_counts "$file" "$comp")"
 
   cpu_m=$(cpu_to_m "$cpu")
@@ -146,19 +140,16 @@ process_env() {
 
     TMP=$(mktemp)
 
-    # fusion global + instance
-    if [[ "$INSTANCE_NAME" == "meta" ]]; then
-      cp "$instance/values.yaml" "$TMP"
-    else
-      yq eval-all 'select(fileIndex == 0) *+ select(fileIndex == 1)' \
-        "$GLOBAL_VALUES" "$instance/values.yaml" > "$TMP"
-    fi
+    # 🔥 MERGE EXACT COMME HELM
+    helm template dummy helm \
+      -f "$GLOBAL_VALUES" \
+      -f "$instance/values.yaml" \
+      --debug 2>/dev/null \
+      | yq eval 'select(.kind=="ArgoCD") | .spec' - > "$TMP"
 
-    for comp in server repoServer controller dex; do
+    for comp in server repoServer controller dex redis; do
       process_component "$TMP" "$comp"
     done
-
-    process_component "$TMP" "redis"
 
     ha_enabled=$(yq eval '.ha.enabled // "false"' "$TMP")
     if [[ "$ha_enabled" == "true" ]]; then
@@ -173,7 +164,7 @@ process_env() {
   done
 }
 
-# 🚀 EXECUTION
+# execution
 for env in "${ENVS[@]}"; do
   process_env "$env"
 done
