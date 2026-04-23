@@ -10,20 +10,14 @@ GLOBAL_MIN_MEM=0
 GLOBAL_MAX_MEM=0
 
 cpu_to_m() {
-  local cpu="$1"
-  if [[ "$cpu" == *m ]]; then
-    echo "${cpu%m}"
-  else
-    awk "BEGIN {printf \"%d\", $cpu * 1000}"
-  fi
+  [[ "$1" == *m ]] && echo "${1%m}" || awk "BEGIN {printf \"%d\", $1 * 1000}"
 }
 
 mem_to_mi() {
-  local mem="$1"
-  if [[ "$mem" == *Gi ]]; then
-    awk "BEGIN {printf \"%d\", ${mem%Gi} * 1024}"
-  elif [[ "$mem" == *Mi ]]; then
-    echo "${mem%Mi}"
+  if [[ "$1" == *Gi ]]; then
+    awk "BEGIN {printf \"%d\", ${1%Gi} * 1024}"
+  elif [[ "$1" == *Mi ]]; then
+    echo "${1%Mi}"
   else
     echo "0"
   fi
@@ -43,12 +37,8 @@ process_instance() {
   local values_file="$3"
 
   echo ""
-  echo "=============================="
-  echo "Instance: $instance ($env)"
-  echo "=============================="
-
-  printf "%-12s %-10s %-10s %-10s %-10s %-10s\n" "POD" "CPU(m)" "MEM(Mi)" "COUNT" "MIN" "MAX"
-  echo "---------------------------------------------------------------------"
+  echo "INSTANCE: $instance"
+  echo "----------------------------------------"
 
   rendered=$(helm template "$instance" "$CHART_PATH" \
     -f "$CHART_PATH/values.yaml" \
@@ -61,71 +51,48 @@ process_instance() {
 
   while read -r cr; do
 
-    # -------- controller --------
-    ctrl=$(echo "$cr" | jq '.spec.controller.resources // {}')
-    replicas=$(echo "$cr" | jq -r '.spec.controller.sharding.replicas // 1')
+    ### -------- COMPONENTS LOOP --------
+    for comp in controller repo server redis; do
 
-    cpu=$(cpu_to_m "$(get_cpu "$ctrl")")
-    mem=$(mem_to_mi "$(get_mem "$ctrl")")
+      resources=$(echo "$cr" | jq ".spec.$comp.resources // {}")
 
-    printf "%-12s %-10s %-10s %-10s %-10s %-10s\n" "controller" "$cpu" "$mem" "$replicas" "$replicas" "$replicas"
+      cpu=$(cpu_to_m "$(get_cpu "$resources")")
+      mem=$(mem_to_mi "$(get_mem "$resources")")
 
-    inst_min_cpu=$((inst_min_cpu + cpu * replicas))
-    inst_max_cpu=$((inst_max_cpu + cpu * replicas))
-    inst_min_mem=$((inst_min_mem + mem * replicas))
-    inst_max_mem=$((inst_max_mem + mem * replicas))
+      # -------- replicas --------
+      if [[ "$comp" == "server" ]]; then
+        min_rep=$(echo "$cr" | jq -r '.spec.server.autoscaling.minReplicas // .spec.server.replicas // 1')
+        max_rep=$(echo "$cr" | jq -r '.spec.server.autoscaling.maxReplicas // .spec.server.replicas // 1')
+      elif [[ "$comp" == "controller" ]]; then
+        min_rep=$(echo "$cr" | jq -r '.spec.controller.sharding.replicas // 1')
+        max_rep=$min_rep
+      else
+        min_rep=$(echo "$cr" | jq -r ".spec.$comp.replicas // 1")
+        max_rep=$min_rep
+      fi
 
-    # -------- repo --------
-    repo=$(echo "$cr" | jq '.spec.repo.resources // {}')
-    replicas=$(echo "$cr" | jq -r '.spec.repo.replicas // 1')
+      total_min_cpu=$((cpu * min_rep))
+      total_max_cpu=$((cpu * max_rep))
+      total_min_mem=$((mem * min_rep))
+      total_max_mem=$((mem * max_rep))
 
-    cpu=$(cpu_to_m "$(get_cpu "$repo")")
-    mem=$(mem_to_mi "$(get_mem "$repo")")
+      printf "%-10s | pod: %4sm / %4sMi | nb_pods(min/max): %2s / %2s | total(min): %4sm / %4sMi | total(max): %4sm / %4sMi\n" \
+        "$comp" "$cpu" "$mem" "$min_rep" "$max_rep" "$total_min_cpu" "$total_min_mem" "$total_max_cpu" "$total_max_mem"
 
-    printf "%-12s %-10s %-10s %-10s %-10s %-10s\n" "repo" "$cpu" "$mem" "$replicas" "$replicas" "$replicas"
+      inst_min_cpu=$((inst_min_cpu + total_min_cpu))
+      inst_max_cpu=$((inst_max_cpu + total_max_cpu))
+      inst_min_mem=$((inst_min_mem + total_min_mem))
+      inst_max_mem=$((inst_max_mem + total_max_mem))
 
-    inst_min_cpu=$((inst_min_cpu + cpu * replicas))
-    inst_max_cpu=$((inst_max_cpu + cpu * replicas))
-    inst_min_mem=$((inst_min_mem + mem * replicas))
-    inst_max_mem=$((inst_max_mem + mem * replicas))
-
-    # -------- server (HPA) --------
-    server=$(echo "$cr" | jq '.spec.server.resources // {}')
-
-    min_rep=$(echo "$cr" | jq -r '.spec.server.autoscaling.minReplicas // .spec.server.replicas // 1')
-    max_rep=$(echo "$cr" | jq -r '.spec.server.autoscaling.maxReplicas // $min_rep')
-
-    cpu=$(cpu_to_m "$(get_cpu "$server")")
-    mem=$(mem_to_mi "$(get_mem "$server")")
-
-    printf "%-12s %-10s %-10s %-10s %-10s %-10s\n" "server" "$cpu" "$mem" "$min_rep" "$min_rep" "$max_rep"
-
-    inst_min_cpu=$((inst_min_cpu + cpu * min_rep))
-    inst_max_cpu=$((inst_max_cpu + cpu * max_rep))
-    inst_min_mem=$((inst_min_mem + mem * min_rep))
-    inst_max_mem=$((inst_max_mem + mem * max_rep))
-
-    # -------- redis --------
-    redis=$(echo "$cr" | jq '.spec.redis.resources // {}')
-    replicas=$(echo "$cr" | jq -r '.spec.redis.replicas // 1')
-
-    cpu=$(cpu_to_m "$(get_cpu "$redis")")
-    mem=$(mem_to_mi "$(get_mem "$redis")")
-
-    printf "%-12s %-10s %-10s %-10s %-10s %-10s\n" "redis" "$cpu" "$mem" "$replicas" "$replicas" "$replicas"
-
-    inst_min_cpu=$((inst_min_cpu + cpu * replicas))
-    inst_max_cpu=$((inst_max_cpu + cpu * replicas))
-    inst_min_mem=$((inst_min_mem + mem * replicas))
-    inst_max_mem=$((inst_max_mem + mem * replicas))
+    done
 
   done < <(
     echo "$rendered" | yq -o=json '.' | jq -c 'select(.kind=="ArgoCD")'
   )
 
-  echo "---------------------------------------------------------------------"
-  echo "Instance TOTAL MIN  → CPU: ${inst_min_cpu}m | MEM: ${inst_min_mem}Mi"
-  echo "Instance TOTAL MAX  → CPU: ${inst_max_cpu}m | MEM: ${inst_max_mem}Mi"
+  echo "----------------------------------------"
+  echo "INSTANCE TOTAL (MIN): ${inst_min_cpu}m CPU / ${inst_min_mem}Mi MEM"
+  echo "INSTANCE TOTAL (MAX): ${inst_max_cpu}m CPU / ${inst_max_mem}Mi MEM"
 
   GLOBAL_MIN_CPU=$((GLOBAL_MIN_CPU + inst_min_cpu))
   GLOBAL_MAX_CPU=$((GLOBAL_MAX_CPU + inst_max_cpu))
@@ -133,27 +100,20 @@ process_instance() {
   GLOBAL_MAX_MEM=$((GLOBAL_MAX_MEM + inst_max_mem))
 }
 
-# -----------------------------
-# MAIN
-# -----------------------------
+# -------- MAIN --------
 for env in nprd prod; do
   echo ""
   echo "################################"
   echo "ENV: $env"
   echo "################################"
 
-  for instance_dir in "$INSTANCES_DIR/$env"/*; do
-    instance=$(basename "$instance_dir")
-    values_file="$instance_dir/values.yaml"
-
-    [[ -f "$values_file" ]] && process_instance "$env" "$instance" "$values_file"
+  for d in "$INSTANCES_DIR/$env"/*; do
+    [[ -f "$d/values.yaml" ]] && process_instance "$env" "$(basename "$d")" "$d/values.yaml"
   done
 done
 
 echo ""
-echo "======================================"
-echo "GLOBAL TOTAL (ALL INSTANCES)"
-echo "======================================"
+echo "=========== GLOBAL TOTAL ==========="
 echo "MIN CPU: ${GLOBAL_MIN_CPU}m"
 echo "MAX CPU: ${GLOBAL_MAX_CPU}m"
 echo "MIN MEM: ${GLOBAL_MIN_MEM}Mi"
