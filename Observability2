@@ -34,7 +34,22 @@ mem_to_mi() {
 }
 
 # -----------------------------
-# Process one instance
+# Get resource (requests -> limits fallback)
+# -----------------------------
+get_cpu() {
+  echo "$1" | jq -r '
+    .requests.cpu // .limits.cpu // "0"
+  '
+}
+
+get_mem() {
+  echo "$1" | jq -r '
+    .requests.memory // .limits.memory // "0"
+  '
+}
+
+# -----------------------------
+# Process ArgoCD CR
 # -----------------------------
 process_instance() {
   local env="$1"
@@ -52,59 +67,115 @@ process_instance() {
   total_cpu=0
   total_mem=0
 
-  # Parsing SAFE (fix jq error)
   echo "$rendered" | yq -o=json '.' | jq -c '
     if type == "array" then .[] else . end
-    | select(type == "object")
-    | select(has("kind"))
-    | select(.kind == "Deployment" or .kind == "StatefulSet")
-  ' | while read -r workload; do
+    | select(.kind == "ArgoCD")
+  ' | while read -r cr; do
 
-    name=$(echo "$workload" | jq -r '.metadata.name')
+    # -----------------------------
+    # CONTROLLER
+    # -----------------------------
+    ctrl=$(echo "$cr" | jq '.spec.controller.resources // {}')
+    ctrl_replicas=$(echo "$cr" | jq -r '.spec.controller.sharding.replicas // 1')
 
-    replicas=$(echo "$workload" | jq -r '
-      if .spec.replicas then .spec.replicas else 1 end
+    cpu=$(get_cpu "$ctrl")
+    mem=$(get_mem "$ctrl")
+
+    cpu_m=$(cpu_to_m "$cpu")
+    mem_mi=$(mem_to_mi "$mem")
+
+    total_ctrl_cpu=$((cpu_m * ctrl_replicas))
+    total_ctrl_mem=$((mem_mi * ctrl_replicas))
+
+    echo "→ controller"
+    echo "  replicas: $ctrl_replicas"
+    echo "  cpu: ${total_ctrl_cpu}m"
+    echo "  memory: ${total_ctrl_mem}Mi"
+
+    total_cpu=$((total_cpu + total_ctrl_cpu))
+    total_mem=$((total_mem + total_ctrl_mem))
+
+    # -----------------------------
+    # REPO SERVER
+    # -----------------------------
+    repo=$(echo "$cr" | jq '.spec.repo.resources // {}')
+    repo_replicas=$(echo "$cr" | jq -r '.spec.repo.replicas // 1')
+
+    cpu=$(get_cpu "$repo")
+    mem=$(get_mem "$repo")
+
+    cpu_m=$(cpu_to_m "$cpu")
+    mem_mi=$(mem_to_mi "$mem")
+
+    total_repo_cpu=$((cpu_m * repo_replicas))
+    total_repo_mem=$((mem_mi * repo_replicas))
+
+    echo "→ repoServer"
+    echo "  replicas: $repo_replicas"
+    echo "  cpu: ${total_repo_cpu}m"
+    echo "  memory: ${total_repo_mem}Mi"
+
+    total_cpu=$((total_cpu + total_repo_cpu))
+    total_mem=$((total_mem + total_repo_mem))
+
+    # -----------------------------
+    # SERVER (autoscaling aware)
+    # -----------------------------
+    server=$(echo "$cr" | jq '.spec.server.resources // {}')
+
+    server_replicas=$(echo "$cr" | jq -r '
+      .spec.server.replicas //
+      .spec.server.autoscaling.minReplicas //
+      1
     ')
 
-    # fallback autoscaling
-    if [[ "$replicas" == "null" ]]; then
-      replicas=1
-    fi
+    cpu=$(get_cpu "$server")
+    mem=$(get_mem "$server")
 
-    containers=$(echo "$workload" | jq -c '.spec.template.spec.containers[]')
+    cpu_m=$(cpu_to_m "$cpu")
+    mem_mi=$(mem_to_mi "$mem")
 
-    container_count=$(echo "$containers" | wc -l | tr -d ' ')
+    total_srv_cpu=$((cpu_m * server_replicas))
+    total_srv_mem=$((mem_mi * server_replicas))
 
-    pod_cpu=0
-    pod_mem=0
+    echo "→ server"
+    echo "  replicas: $server_replicas"
+    echo "  cpu: ${total_srv_cpu}m"
+    echo "  memory: ${total_srv_mem}Mi"
 
-    while read -r c; do
-      cpu=$(echo "$c" | jq -r '.resources.requests.cpu // "0"')
-      mem=$(echo "$c" | jq -r '.resources.requests.memory // "0"')
+    total_cpu=$((total_cpu + total_srv_cpu))
+    total_mem=$((total_mem + total_srv_mem))
 
-      cpu_m=$(cpu_to_m "$cpu")
-      mem_mi=$(mem_to_mi "$mem")
+    # -----------------------------
+    # REDIS (HA support simple)
+    # -----------------------------
+    redis=$(echo "$cr" | jq '.spec.redis.resources // {}')
+    redis_replicas=$(echo "$cr" | jq -r '.spec.redis.replicas // 1')
 
-      pod_cpu=$((pod_cpu + cpu_m))
-      pod_mem=$((pod_mem + mem_mi))
+    # 👉 tweak ici si redis-ha (ex: 3 pods * 2 containers)
+    redis_container_count=1
 
-    done <<< "$containers"
+    cpu=$(get_cpu "$redis")
+    mem=$(get_mem "$redis")
 
-    total_workload_cpu=$((pod_cpu * replicas))
-    total_workload_mem=$((pod_mem * replicas))
+    cpu_m=$(cpu_to_m "$cpu")
+    mem_mi=$(mem_to_mi "$mem")
 
-    total_cpu=$((total_cpu + total_workload_cpu))
-    total_mem=$((total_mem + total_workload_mem))
+    total_redis_cpu=$((cpu_m * redis_replicas * redis_container_count))
+    total_redis_mem=$((mem_mi * redis_replicas * redis_container_count))
 
-    echo "→ $name"
-    echo "  replicas: $replicas"
-    echo "  containers: $container_count"
-    echo "  cpu: ${total_workload_cpu}m"
-    echo "  memory: ${total_workload_mem}Mi"
-    echo ""
+    echo "→ redis"
+    echo "  replicas: $redis_replicas"
+    echo "  containers: $redis_container_count"
+    echo "  cpu: ${total_redis_cpu}m"
+    echo "  memory: ${total_redis_mem}Mi"
+
+    total_cpu=$((total_cpu + total_redis_cpu))
+    total_mem=$((total_mem + total_redis_mem))
 
   done
 
+  echo ""
   echo "TOTAL Instance $instance:"
   echo "CPU: ${total_cpu}m"
   echo "Memory: ${total_mem}Mi"
