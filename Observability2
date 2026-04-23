@@ -9,6 +9,9 @@ GLOBAL_MAX_CPU=0
 GLOBAL_MIN_MEM=0
 GLOBAL_MAX_MEM=0
 
+# -----------------------------
+# Conversions
+# -----------------------------
 cpu_to_m() {
   [[ "$1" == *m ]] && echo "${1%m}" || awk "BEGIN {printf \"%d\", $1 * 1000}"
 }
@@ -31,14 +34,17 @@ get_mem() {
   echo "$1" | jq -r '.requests.memory // .limits.memory // "0"'
 }
 
+# -----------------------------
+# Processing
+# -----------------------------
 process_instance() {
   local env="$1"
   local instance="$2"
   local values_file="$3"
 
   echo ""
-  echo "INSTANCE: $instance"
-  echo "----------------------------------------"
+  echo "INSTANCE: $instance ($env)"
+  echo "------------------------------------------------------------"
 
   rendered=$(helm template "$instance" "$CHART_PATH" \
     -f "$CHART_PATH/values.yaml" \
@@ -51,32 +57,52 @@ process_instance() {
 
   while read -r cr; do
 
-    ### -------- COMPONENTS LOOP --------
-    for comp in controller repo server redis; do
+    for comp in controller repo server redis dex; do
 
-      resources=$(echo "$cr" | jq ".spec.$comp.resources // {}")
+      # -----------------------------
+      # Resolve resources & replicas
+      # -----------------------------
+      if [[ "$comp" == "dex" ]]; then
+        resources=$(echo "$cr" | jq '.spec.sso.dex.resources // {}')
+        min_rep=1
+        max_rep=1
 
-      cpu=$(cpu_to_m "$(get_cpu "$resources")")
-      mem=$(mem_to_mi "$(get_mem "$resources")")
+      elif [[ "$comp" == "server" ]]; then
+        resources=$(echo "$cr" | jq '.spec.server.resources // {}')
 
-      # -------- replicas --------
-      if [[ "$comp" == "server" ]]; then
-        min_rep=$(echo "$cr" | jq -r '.spec.server.autoscaling.minReplicas // .spec.server.replicas // 1')
-        max_rep=$(echo "$cr" | jq -r '.spec.server.autoscaling.maxReplicas // .spec.server.replicas // 1')
+        autoscaling_enabled=$(echo "$cr" | jq -r '.spec.server.autoscaling.enabled // false')
+
+        if [[ "$autoscaling_enabled" == "true" ]]; then
+          min_rep=$(echo "$cr" | jq -r '.spec.server.autoscaling.minReplicas // 1')
+          max_rep=$(echo "$cr" | jq -r '.spec.server.autoscaling.maxReplicas // 1')
+        else
+          min_rep=$(echo "$cr" | jq -r '.spec.server.replicas // 1')
+          max_rep=$min_rep
+        fi
+
       elif [[ "$comp" == "controller" ]]; then
+        resources=$(echo "$cr" | jq '.spec.controller.resources // {}')
         min_rep=$(echo "$cr" | jq -r '.spec.controller.sharding.replicas // 1')
         max_rep=$min_rep
+
       else
+        resources=$(echo "$cr" | jq ".spec.$comp.resources // {}")
         min_rep=$(echo "$cr" | jq -r ".spec.$comp.replicas // 1")
         max_rep=$min_rep
       fi
+
+      # skip si pas de resources
+      [[ "$resources" == "{}" ]] && continue
+
+      cpu=$(cpu_to_m "$(get_cpu "$resources")")
+      mem=$(mem_to_mi "$(get_mem "$resources")")
 
       total_min_cpu=$((cpu * min_rep))
       total_max_cpu=$((cpu * max_rep))
       total_min_mem=$((mem * min_rep))
       total_max_mem=$((mem * max_rep))
 
-      printf "%-10s | pod: %4sm / %4sMi | nb_pods(min/max): %2s / %2s | total(min): %4sm / %4sMi | total(max): %4sm / %4sMi\n" \
+      printf "%-10s | pod: %4sm / %4sMi | nb_pods(min/max): %2s / %2s | total(min): %5sm / %5sMi | total(max): %5sm / %5sMi\n" \
         "$comp" "$cpu" "$mem" "$min_rep" "$max_rep" "$total_min_cpu" "$total_min_mem" "$total_max_cpu" "$total_max_mem"
 
       inst_min_cpu=$((inst_min_cpu + total_min_cpu))
@@ -90,7 +116,7 @@ process_instance() {
     echo "$rendered" | yq -o=json '.' | jq -c 'select(.kind=="ArgoCD")'
   )
 
-  echo "----------------------------------------"
+  echo "------------------------------------------------------------"
   echo "INSTANCE TOTAL (MIN): ${inst_min_cpu}m CPU / ${inst_min_mem}Mi MEM"
   echo "INSTANCE TOTAL (MAX): ${inst_max_cpu}m CPU / ${inst_max_mem}Mi MEM"
 
@@ -100,7 +126,9 @@ process_instance() {
   GLOBAL_MAX_MEM=$((GLOBAL_MAX_MEM + inst_max_mem))
 }
 
-# -------- MAIN --------
+# -----------------------------
+# MAIN LOOP
+# -----------------------------
 for env in nprd prod; do
   echo ""
   echo "################################"
@@ -112,9 +140,17 @@ for env in nprd prod; do
   done
 done
 
+# -----------------------------
+# GLOBAL TOTAL + CONVERSION
+# -----------------------------
 echo ""
-echo "=========== GLOBAL TOTAL ==========="
-echo "MIN CPU: ${GLOBAL_MIN_CPU}m"
-echo "MAX CPU: ${GLOBAL_MAX_CPU}m"
-echo "MIN MEM: ${GLOBAL_MIN_MEM}Mi"
-echo "MAX MEM: ${GLOBAL_MAX_MEM}Mi"
+echo "================ GLOBAL TOTAL ================"
+
+min_cpu_cores=$(awk "BEGIN {printf \"%.2f\", $GLOBAL_MIN_CPU / 1000}")
+max_cpu_cores=$(awk "BEGIN {printf \"%.2f\", $GLOBAL_MAX_CPU / 1000}")
+
+min_mem_gi=$(awk "BEGIN {printf \"%.2f\", $GLOBAL_MIN_MEM / 1024}")
+max_mem_gi=$(awk "BEGIN {printf \"%.2f\", $GLOBAL_MAX_MEM / 1024}")
+
+echo "MIN → CPU: ${GLOBAL_MIN_CPU}m (${min_cpu_cores} cores) | MEM: ${GLOBAL_MIN_MEM}Mi (${min_mem_gi} Gi)"
+echo "MAX → CPU: ${GLOBAL_MAX_CPU}m (${max_cpu_cores} cores) | MEM: ${GLOBAL_MAX_MEM}Mi (${max_mem_gi} Gi)"
