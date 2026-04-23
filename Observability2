@@ -6,26 +6,28 @@ CHART_PATH="./helm"
 INSTANCES_DIR="./instances"
 
 # -----------------------------
-# Convert CPU → millicores
+# CPU → millicores
 # -----------------------------
 cpu_to_m() {
   local cpu="$1"
   if [[ "$cpu" == *m ]]; then
     echo "${cpu%m}"
   elif [[ "$cpu" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-    echo "$(awk "BEGIN {print int($cpu * 1000)}")"
+    awk "BEGIN {printf \"%d\", $cpu * 1000}"
   else
     echo "0"
   fi
 }
 
 # -----------------------------
-# Convert memory → Mi
+# Memory → Mi (FLOAT SAFE)
 # -----------------------------
 mem_to_mi() {
   local mem="$1"
+
   if [[ "$mem" == *Gi ]]; then
-    echo "$(( ${mem%Gi} * 1024 ))"
+    val="${mem%Gi}"
+    awk "BEGIN {printf \"%d\", $val * 1024}"
   elif [[ "$mem" == *Mi ]]; then
     echo "${mem%Mi}"
   else
@@ -34,22 +36,26 @@ mem_to_mi() {
 }
 
 # -----------------------------
-# Get resource (requests -> limits fallback)
+# Safe jq extract
 # -----------------------------
 get_cpu() {
   echo "$1" | jq -r '
-    .requests.cpu // .limits.cpu // "0"
+    if type=="object" then
+      (.requests.cpu // .limits.cpu // "0")
+    else "0" end
   '
 }
 
 get_mem() {
   echo "$1" | jq -r '
-    .requests.memory // .limits.memory // "0"
+    if type=="object" then
+      (.requests.memory // .limits.memory // "0")
+    else "0" end
   '
 }
 
 # -----------------------------
-# Process ArgoCD CR
+# Process instance
 # -----------------------------
 process_instance() {
   local env="$1"
@@ -68,13 +74,11 @@ process_instance() {
   total_mem=0
 
   echo "$rendered" | yq -o=json '.' | jq -c '
-    if type == "array" then .[] else . end
-    | select(.kind == "ArgoCD")
+    if type=="array" then .[] else . end
+    | select(.kind=="ArgoCD")
   ' | while read -r cr; do
 
-    # -----------------------------
-    # CONTROLLER
-    # -----------------------------
+    # -------- CONTROLLER --------
     ctrl=$(echo "$cr" | jq '.spec.controller.resources // {}')
     ctrl_replicas=$(echo "$cr" | jq -r '.spec.controller.sharding.replicas // 1')
 
@@ -87,17 +91,14 @@ process_instance() {
     total_ctrl_cpu=$((cpu_m * ctrl_replicas))
     total_ctrl_mem=$((mem_mi * ctrl_replicas))
 
-    echo "→ controller"
-    echo "  replicas: $ctrl_replicas"
+    echo "→ controller ($ctrl_replicas replicas)"
     echo "  cpu: ${total_ctrl_cpu}m"
     echo "  memory: ${total_ctrl_mem}Mi"
 
     total_cpu=$((total_cpu + total_ctrl_cpu))
     total_mem=$((total_mem + total_ctrl_mem))
 
-    # -----------------------------
-    # REPO SERVER
-    # -----------------------------
+    # -------- REPO --------
     repo=$(echo "$cr" | jq '.spec.repo.resources // {}')
     repo_replicas=$(echo "$cr" | jq -r '.spec.repo.replicas // 1')
 
@@ -110,17 +111,14 @@ process_instance() {
     total_repo_cpu=$((cpu_m * repo_replicas))
     total_repo_mem=$((mem_mi * repo_replicas))
 
-    echo "→ repoServer"
-    echo "  replicas: $repo_replicas"
+    echo "→ repo ($repo_replicas replicas)"
     echo "  cpu: ${total_repo_cpu}m"
     echo "  memory: ${total_repo_mem}Mi"
 
     total_cpu=$((total_cpu + total_repo_cpu))
     total_mem=$((total_mem + total_repo_mem))
 
-    # -----------------------------
-    # SERVER (autoscaling aware)
-    # -----------------------------
+    # -------- SERVER --------
     server=$(echo "$cr" | jq '.spec.server.resources // {}')
 
     server_replicas=$(echo "$cr" | jq -r '
@@ -138,22 +136,18 @@ process_instance() {
     total_srv_cpu=$((cpu_m * server_replicas))
     total_srv_mem=$((mem_mi * server_replicas))
 
-    echo "→ server"
-    echo "  replicas: $server_replicas"
+    echo "→ server ($server_replicas replicas)"
     echo "  cpu: ${total_srv_cpu}m"
     echo "  memory: ${total_srv_mem}Mi"
 
     total_cpu=$((total_cpu + total_srv_cpu))
     total_mem=$((total_mem + total_srv_mem))
 
-    # -----------------------------
-    # REDIS (HA support simple)
-    # -----------------------------
+    # -------- REDIS (safe null) --------
     redis=$(echo "$cr" | jq '.spec.redis.resources // {}')
     redis_replicas=$(echo "$cr" | jq -r '.spec.redis.replicas // 1')
 
-    # 👉 tweak ici si redis-ha (ex: 3 pods * 2 containers)
-    redis_container_count=1
+    redis_containers=1  # adapte si redis-ha
 
     cpu=$(get_cpu "$redis")
     mem=$(get_mem "$redis")
@@ -161,12 +155,10 @@ process_instance() {
     cpu_m=$(cpu_to_m "$cpu")
     mem_mi=$(mem_to_mi "$mem")
 
-    total_redis_cpu=$((cpu_m * redis_replicas * redis_container_count))
-    total_redis_mem=$((mem_mi * redis_replicas * redis_container_count))
+    total_redis_cpu=$((cpu_m * redis_replicas * redis_containers))
+    total_redis_mem=$((mem_mi * redis_replicas * redis_containers))
 
-    echo "→ redis"
-    echo "  replicas: $redis_replicas"
-    echo "  containers: $redis_container_count"
+    echo "→ redis ($redis_replicas replicas)"
     echo "  cpu: ${total_redis_cpu}m"
     echo "  memory: ${total_redis_mem}Mi"
 
@@ -183,7 +175,7 @@ process_instance() {
 }
 
 # -----------------------------
-# MAIN LOOP
+# MAIN
 # -----------------------------
 for env in nprd prod; do
   echo "################################"
