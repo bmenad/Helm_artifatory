@@ -1,33 +1,27 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 CHART_PATH="./helm"
 INSTANCES_DIR="./instances"
 
-# -----------------------------
-# CPU → millicores
-# -----------------------------
+GLOBAL_MIN_CPU=0
+GLOBAL_MAX_CPU=0
+GLOBAL_MIN_MEM=0
+GLOBAL_MAX_MEM=0
+
 cpu_to_m() {
   local cpu="$1"
   if [[ "$cpu" == *m ]]; then
     echo "${cpu%m}"
-  elif [[ "$cpu" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-    awk "BEGIN {printf \"%d\", $cpu * 1000}"
   else
-    echo "0"
+    awk "BEGIN {printf \"%d\", $cpu * 1000}"
   fi
 }
 
-# -----------------------------
-# Memory → Mi (FLOAT SAFE)
-# -----------------------------
 mem_to_mi() {
   local mem="$1"
-
   if [[ "$mem" == *Gi ]]; then
-    val="${mem%Gi}"
-    awk "BEGIN {printf \"%d\", $val * 1024}"
+    awk "BEGIN {printf \"%d\", ${mem%Gi} * 1024}"
   elif [[ "$mem" == *Mi ]]; then
     echo "${mem%Mi}"
   else
@@ -35,149 +29,115 @@ mem_to_mi() {
   fi
 }
 
-# -----------------------------
-# Safe jq extract
-# -----------------------------
 get_cpu() {
-  echo "$1" | jq -r '
-    if type=="object" then
-      (.requests.cpu // .limits.cpu // "0")
-    else "0" end
-  '
+  echo "$1" | jq -r '.requests.cpu // .limits.cpu // "0"'
 }
 
 get_mem() {
-  echo "$1" | jq -r '
-    if type=="object" then
-      (.requests.memory // .limits.memory // "0")
-    else "0" end
-  '
+  echo "$1" | jq -r '.requests.memory // .limits.memory // "0"'
 }
 
-# -----------------------------
-# Process instance
-# -----------------------------
 process_instance() {
   local env="$1"
   local instance="$2"
   local values_file="$3"
 
+  echo ""
   echo "=============================="
   echo "Instance: $instance ($env)"
   echo "=============================="
+
+  printf "%-12s %-10s %-10s %-10s %-10s %-10s\n" "POD" "CPU(m)" "MEM(Mi)" "COUNT" "MIN" "MAX"
+  echo "---------------------------------------------------------------------"
 
   rendered=$(helm template "$instance" "$CHART_PATH" \
     -f "$CHART_PATH/values.yaml" \
     -f "$values_file")
 
-  total_cpu=0
-  total_mem=0
+  inst_min_cpu=0
+  inst_max_cpu=0
+  inst_min_mem=0
+  inst_max_mem=0
 
-  echo "$rendered" | yq -o=json '.' | jq -c '
-    if type=="array" then .[] else . end
-    | select(.kind=="ArgoCD")
-  ' | while read -r cr; do
+  while read -r cr; do
 
-    # -------- CONTROLLER --------
+    # -------- controller --------
     ctrl=$(echo "$cr" | jq '.spec.controller.resources // {}')
-    ctrl_replicas=$(echo "$cr" | jq -r '.spec.controller.sharding.replicas // 1')
+    replicas=$(echo "$cr" | jq -r '.spec.controller.sharding.replicas // 1')
 
-    cpu=$(get_cpu "$ctrl")
-    mem=$(get_mem "$ctrl")
+    cpu=$(cpu_to_m "$(get_cpu "$ctrl")")
+    mem=$(mem_to_mi "$(get_mem "$ctrl")")
 
-    cpu_m=$(cpu_to_m "$cpu")
-    mem_mi=$(mem_to_mi "$mem")
+    printf "%-12s %-10s %-10s %-10s %-10s %-10s\n" "controller" "$cpu" "$mem" "$replicas" "$replicas" "$replicas"
 
-    total_ctrl_cpu=$((cpu_m * ctrl_replicas))
-    total_ctrl_mem=$((mem_mi * ctrl_replicas))
+    inst_min_cpu=$((inst_min_cpu + cpu * replicas))
+    inst_max_cpu=$((inst_max_cpu + cpu * replicas))
+    inst_min_mem=$((inst_min_mem + mem * replicas))
+    inst_max_mem=$((inst_max_mem + mem * replicas))
 
-    echo "→ controller ($ctrl_replicas replicas)"
-    echo "  cpu: ${total_ctrl_cpu}m"
-    echo "  memory: ${total_ctrl_mem}Mi"
-
-    total_cpu=$((total_cpu + total_ctrl_cpu))
-    total_mem=$((total_mem + total_ctrl_mem))
-
-    # -------- REPO --------
+    # -------- repo --------
     repo=$(echo "$cr" | jq '.spec.repo.resources // {}')
-    repo_replicas=$(echo "$cr" | jq -r '.spec.repo.replicas // 1')
+    replicas=$(echo "$cr" | jq -r '.spec.repo.replicas // 1')
 
-    cpu=$(get_cpu "$repo")
-    mem=$(get_mem "$repo")
+    cpu=$(cpu_to_m "$(get_cpu "$repo")")
+    mem=$(mem_to_mi "$(get_mem "$repo")")
 
-    cpu_m=$(cpu_to_m "$cpu")
-    mem_mi=$(mem_to_mi "$mem")
+    printf "%-12s %-10s %-10s %-10s %-10s %-10s\n" "repo" "$cpu" "$mem" "$replicas" "$replicas" "$replicas"
 
-    total_repo_cpu=$((cpu_m * repo_replicas))
-    total_repo_mem=$((mem_mi * repo_replicas))
+    inst_min_cpu=$((inst_min_cpu + cpu * replicas))
+    inst_max_cpu=$((inst_max_cpu + cpu * replicas))
+    inst_min_mem=$((inst_min_mem + mem * replicas))
+    inst_max_mem=$((inst_max_mem + mem * replicas))
 
-    echo "→ repo ($repo_replicas replicas)"
-    echo "  cpu: ${total_repo_cpu}m"
-    echo "  memory: ${total_repo_mem}Mi"
-
-    total_cpu=$((total_cpu + total_repo_cpu))
-    total_mem=$((total_mem + total_repo_mem))
-
-    # -------- SERVER --------
+    # -------- server (HPA) --------
     server=$(echo "$cr" | jq '.spec.server.resources // {}')
 
-    server_replicas=$(echo "$cr" | jq -r '
-      .spec.server.replicas //
-      .spec.server.autoscaling.minReplicas //
-      1
-    ')
+    min_rep=$(echo "$cr" | jq -r '.spec.server.autoscaling.minReplicas // .spec.server.replicas // 1')
+    max_rep=$(echo "$cr" | jq -r '.spec.server.autoscaling.maxReplicas // $min_rep')
 
-    cpu=$(get_cpu "$server")
-    mem=$(get_mem "$server")
+    cpu=$(cpu_to_m "$(get_cpu "$server")")
+    mem=$(mem_to_mi "$(get_mem "$server")")
 
-    cpu_m=$(cpu_to_m "$cpu")
-    mem_mi=$(mem_to_mi "$mem")
+    printf "%-12s %-10s %-10s %-10s %-10s %-10s\n" "server" "$cpu" "$mem" "$min_rep" "$min_rep" "$max_rep"
 
-    total_srv_cpu=$((cpu_m * server_replicas))
-    total_srv_mem=$((mem_mi * server_replicas))
+    inst_min_cpu=$((inst_min_cpu + cpu * min_rep))
+    inst_max_cpu=$((inst_max_cpu + cpu * max_rep))
+    inst_min_mem=$((inst_min_mem + mem * min_rep))
+    inst_max_mem=$((inst_max_mem + mem * max_rep))
 
-    echo "→ server ($server_replicas replicas)"
-    echo "  cpu: ${total_srv_cpu}m"
-    echo "  memory: ${total_srv_mem}Mi"
-
-    total_cpu=$((total_cpu + total_srv_cpu))
-    total_mem=$((total_mem + total_srv_mem))
-
-    # -------- REDIS (safe null) --------
+    # -------- redis --------
     redis=$(echo "$cr" | jq '.spec.redis.resources // {}')
-    redis_replicas=$(echo "$cr" | jq -r '.spec.redis.replicas // 1')
+    replicas=$(echo "$cr" | jq -r '.spec.redis.replicas // 1')
 
-    redis_containers=1  # adapte si redis-ha
+    cpu=$(cpu_to_m "$(get_cpu "$redis")")
+    mem=$(mem_to_mi "$(get_mem "$redis")")
 
-    cpu=$(get_cpu "$redis")
-    mem=$(get_mem "$redis")
+    printf "%-12s %-10s %-10s %-10s %-10s %-10s\n" "redis" "$cpu" "$mem" "$replicas" "$replicas" "$replicas"
 
-    cpu_m=$(cpu_to_m "$cpu")
-    mem_mi=$(mem_to_mi "$mem")
+    inst_min_cpu=$((inst_min_cpu + cpu * replicas))
+    inst_max_cpu=$((inst_max_cpu + cpu * replicas))
+    inst_min_mem=$((inst_min_mem + mem * replicas))
+    inst_max_mem=$((inst_max_mem + mem * replicas))
 
-    total_redis_cpu=$((cpu_m * redis_replicas * redis_containers))
-    total_redis_mem=$((mem_mi * redis_replicas * redis_containers))
+  done < <(
+    echo "$rendered" | yq -o=json '.' | jq -c 'select(.kind=="ArgoCD")'
+  )
 
-    echo "→ redis ($redis_replicas replicas)"
-    echo "  cpu: ${total_redis_cpu}m"
-    echo "  memory: ${total_redis_mem}Mi"
+  echo "---------------------------------------------------------------------"
+  echo "Instance TOTAL MIN  → CPU: ${inst_min_cpu}m | MEM: ${inst_min_mem}Mi"
+  echo "Instance TOTAL MAX  → CPU: ${inst_max_cpu}m | MEM: ${inst_max_mem}Mi"
 
-    total_cpu=$((total_cpu + total_redis_cpu))
-    total_mem=$((total_mem + total_redis_mem))
-
-  done
-
-  echo ""
-  echo "TOTAL Instance $instance:"
-  echo "CPU: ${total_cpu}m"
-  echo "Memory: ${total_mem}Mi"
-  echo ""
+  GLOBAL_MIN_CPU=$((GLOBAL_MIN_CPU + inst_min_cpu))
+  GLOBAL_MAX_CPU=$((GLOBAL_MAX_CPU + inst_max_cpu))
+  GLOBAL_MIN_MEM=$((GLOBAL_MIN_MEM + inst_min_mem))
+  GLOBAL_MAX_MEM=$((GLOBAL_MAX_MEM + inst_max_mem))
 }
 
 # -----------------------------
 # MAIN
 # -----------------------------
 for env in nprd prod; do
+  echo ""
   echo "################################"
   echo "ENV: $env"
   echo "################################"
@@ -186,8 +146,15 @@ for env in nprd prod; do
     instance=$(basename "$instance_dir")
     values_file="$instance_dir/values.yaml"
 
-    if [[ -f "$values_file" ]]; then
-      process_instance "$env" "$instance" "$values_file"
-    fi
+    [[ -f "$values_file" ]] && process_instance "$env" "$instance" "$values_file"
   done
 done
+
+echo ""
+echo "======================================"
+echo "GLOBAL TOTAL (ALL INSTANCES)"
+echo "======================================"
+echo "MIN CPU: ${GLOBAL_MIN_CPU}m"
+echo "MAX CPU: ${GLOBAL_MAX_CPU}m"
+echo "MIN MEM: ${GLOBAL_MIN_MEM}Mi"
+echo "MAX MEM: ${GLOBAL_MAX_MEM}Mi"
