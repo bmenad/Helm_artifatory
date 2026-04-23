@@ -1,132 +1,116 @@
 #!/usr/bin/env bash
+
 set -euo pipefail
 
-CHART="./helm"
-BASE_VALUES="./helm/values.yaml"
+CHART_PATH="./helm"
 INSTANCES_DIR="./instances"
 
-GLOBAL_MIN_CPU=0
-GLOBAL_MAX_CPU=0
-GLOBAL_MIN_MEM=0
-GLOBAL_MAX_MEM=0
-
-echo "Rendering + scanning: $INSTANCES_DIR"
-
-# -------- Utils --------
-
-get() {
-  yq "$1 // \"\"" "$2"
-}
-
+# Convert CPU to millicores
 cpu_to_m() {
-  local v="$1"
-  [[ -z "$v" ]] && echo 0 && return
-  if [[ "$v" == *m ]]; then
-    echo "${v%m}"
+  local cpu="$1"
+  if [[ "$cpu" == *m ]]; then
+    echo "${cpu%m}"
   else
-    awk "BEGIN {printf \"%d\", $v * 1000}"
+    echo "$((cpu * 1000))"
   fi
 }
 
+# Convert memory to Mi
 mem_to_mi() {
-  local v="$1"
-  [[ -z "$v" ]] && echo 0 && return
-
-  if [[ "$v" == *Gi ]]; then
-    awk "BEGIN {printf \"%d\", ${v%Gi} * 1024}"
-  elif [[ "$v" == *Mi ]]; then
-    echo "${v%Mi}"
+  local mem="$1"
+  if [[ "$mem" == *Gi ]]; then
+    echo "$(( ${mem%Gi} * 1024 ))"
+  elif [[ "$mem" == *Mi ]]; then
+    echo "${mem%Mi}"
   else
-    echo 0
+    echo "0"
   fi
 }
 
-safe_int() {
-  local v="$1"
-  [[ -z "$v" || "$v" == "null" ]] && echo 0 || echo "$v"
+process_instance() {
+  local env="$1"
+  local instance="$2"
+  local values_file="$3"
+
+  echo "=============================="
+  echo "Instance: $instance ($env)"
+  echo "=============================="
+
+  # Render Helm (MERGE effectué ici)
+  rendered=$(helm template "$instance" "$CHART_PATH" \
+    -f "$CHART_PATH/values.yaml" \
+    -f "$values_file")
+
+  total_cpu=0
+  total_mem=0
+
+  echo "$rendered" | yq -o=json '.' | jq -c '
+    .[] | select(.kind == "Deployment" or .kind == "StatefulSet")
+  ' | while read -r workload; do
+
+    name=$(echo "$workload" | jq -r '.metadata.name')
+
+    replicas=$(echo "$workload" | jq -r '
+      if .spec.replicas then .spec.replicas else 1 end
+    ')
+
+    # autoscaling fallback
+    if [[ "$replicas" == "null" ]]; then
+      replicas=1
+    fi
+
+    containers=$(echo "$workload" | jq -c '.spec.template.spec.containers[]')
+
+    container_count=$(echo "$containers" | wc -l)
+
+    pod_cpu=0
+    pod_mem=0
+
+    while read -r c; do
+      cpu=$(echo "$c" | jq -r '.resources.requests.cpu // "0"')
+      mem=$(echo "$c" | jq -r '.resources.requests.memory // "0"')
+
+      cpu_m=$(cpu_to_m "$cpu")
+      mem_mi=$(mem_to_mi "$mem")
+
+      pod_cpu=$((pod_cpu + cpu_m))
+      pod_mem=$((pod_mem + mem_mi))
+
+    done <<< "$containers"
+
+    total_workload_cpu=$((pod_cpu * replicas))
+    total_workload_mem=$((pod_mem * replicas))
+
+    total_cpu=$((total_cpu + total_workload_cpu))
+    total_mem=$((total_mem + total_workload_mem))
+
+    echo "→ $name"
+    echo "  replicas: $replicas"
+    echo "  containers: $container_count"
+    echo "  cpu: ${total_workload_cpu}m"
+    echo "  memory: ${total_workload_mem}Mi"
+    echo ""
+
+  done
+
+  echo "TOTAL Instance $instance:"
+  echo "CPU: ${total_cpu}m"
+  echo "Memory: ${total_mem}Mi"
+  echo ""
 }
 
-# -------- Loop --------
+# MAIN LOOP
+for env in nprd prod; do
+  echo "################################"
+  echo "ENV: $env"
+  echo "################################"
 
-find "$INSTANCES_DIR" -name values.yaml | while read -r FILE; do
-  TMP=$(mktemp)
+  for instance_dir in "$INSTANCES_DIR/$env"/*; do
+    instance=$(basename "$instance_dir")
+    values_file="$instance_dir/values.yaml"
 
-  helm template metaargo "$CHART" \
-    -f "$BASE_VALUES" \
-    -f "$FILE" \
-    > "$TMP" 2>/dev/null
-
-  echo "------------------------------------------------"
-  echo "Instance: $FILE"
-
-  # ===== CONTROLLER =====
-  ctrl_cpu=$(cpu_to_m "$(get '.spec.controller.resources.requests.cpu' "$TMP")")
-  ctrl_mem=$(mem_to_mi "$(get '.spec.controller.resources.requests.memory' "$TMP")")
-
-  ctrl_rep=$(get '.spec.controller.sharding.replicas // .spec.controller.replicas // 1' "$TMP")
-  ctrl_rep=$(safe_int "$ctrl_rep")
-
-  # ===== REPO =====
-  repo_cpu=$(cpu_to_m "$(get '.spec.repo.resources.requests.cpu' "$TMP")")
-  repo_mem=$(mem_to_mi "$(get '.spec.repo.resources.requests.memory' "$TMP")")
-
-  repo_rep=$(get '.spec.repo.replicas // 1' "$TMP")
-  repo_rep=$(safe_int "$repo_rep")
-
-  # ===== SERVER =====
-  srv_cpu=$(cpu_to_m "$(get '.spec.server.resources.requests.cpu' "$TMP")")
-  srv_mem=$(mem_to_mi "$(get '.spec.server.resources.requests.memory' "$TMP")")
-
-  hpa_enabled=$(get '.spec.server.autoscaling.enabled // .spec.server.hpa.enabled // false' "$TMP")
-
-  if [[ "$hpa_enabled" == "true" ]]; then
-    srv_min=$(get '.spec.server.autoscaling.hpa.minReplicas // .spec.server.autoscaling.minReplicas // .spec.server.hpa.minReplicas // 1' "$TMP")
-    srv_max=$(get '.spec.server.autoscaling.hpa.maxReplicas // .spec.server.autoscaling.maxReplicas // .spec.server.hpa.maxReplicas // 1' "$TMP")
-  else
-    srv_min=$(get '.spec.server.replicas // 1' "$TMP")
-    srv_max="$srv_min"
-  fi
-
-  srv_min=$(safe_int "$srv_min")
-  srv_max=$(safe_int "$srv_max")
-
-  # ===== DEX =====
-  dex_cpu=$(cpu_to_m "$(get '.spec.dex.resources.requests.cpu' "$TMP")")
-  dex_mem=$(mem_to_mi "$(get '.spec.dex.resources.requests.memory' "$TMP")")
-
-  # ===== REDIS =====
-  redis_cpu=$(cpu_to_m "$(get '.spec.redis.resources.requests.cpu' "$TMP")")
-  redis_mem=$(mem_to_mi "$(get '.spec.redis.resources.requests.memory' "$TMP")")
-
-  # ===== HA (Redis HA / HAProxy) =====
-  ha_cpu=$(cpu_to_m "$(get '.spec.redisHa.resources.requests.cpu' "$TMP")")
-  ha_mem=$(mem_to_mi "$(get '.spec.redisHa.resources.requests.memory' "$TMP")")
-
-  # ===== CALCUL =====
-
-  MIN_CPU=$(( ctrl_cpu*ctrl_rep + repo_cpu*repo_rep + srv_cpu*srv_min + dex_cpu + redis_cpu + ha_cpu ))
-  MAX_CPU=$(( ctrl_cpu*ctrl_rep + repo_cpu*repo_rep + srv_cpu*srv_max + dex_cpu + redis_cpu + ha_cpu ))
-
-  MIN_MEM=$(( ctrl_mem*ctrl_rep + repo_mem*repo_rep + srv_mem*srv_min + dex_mem + redis_mem + ha_mem ))
-  MAX_MEM=$(( ctrl_mem*ctrl_rep + repo_mem*repo_rep + srv_mem*srv_max + dex_mem + redis_mem + ha_mem ))
-
-  echo "CPU  min/max: ${MIN_CPU}m / ${MAX_CPU}m"
-  echo "MEM  min/max: ${MIN_MEM}Mi / ${MAX_MEM}Mi"
-
-  GLOBAL_MIN_CPU=$((GLOBAL_MIN_CPU + MIN_CPU))
-  GLOBAL_MAX_CPU=$((GLOBAL_MAX_CPU + MAX_CPU))
-  GLOBAL_MIN_MEM=$((GLOBAL_MIN_MEM + MIN_MEM))
-  GLOBAL_MAX_MEM=$((GLOBAL_MAX_MEM + MAX_MEM))
-
-  rm -f "$TMP"
+    if [[ -f "$values_file" ]]; then
+      process_instance "$env" "$instance" "$values_file"
+    fi
+  done
 done
-
-# -------- GLOBAL --------
-
-echo "================ GLOBAL ================"
-
-printf "CPU MIN: %sm (%.2f cores)\n" "$GLOBAL_MIN_CPU" "$(awk "BEGIN {print $GLOBAL_MIN_CPU/1000}")"
-printf "CPU MAX: %sm (%.2f cores)\n" "$GLOBAL_MAX_CPU" "$(awk "BEGIN {print $GLOBAL_MAX_CPU/1000}")"
-
-printf "MEM MIN: %sMi (%.2f Gi)\n" "$GLOBAL_MIN_MEM" "$(awk "BEGIN {print $GLOBAL_MIN_MEM/1024}")"
-printf "MEM MAX: %sMi (%.2f Gi)\n" "$GLOBAL_MAX_MEM" "$(awk "BEGIN {print $GLOBAL_MAX_MEM/1024}")"
