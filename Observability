@@ -1068,7 +1068,12 @@ echo "MAX CPU: ${TOTAL_MAX_CPU}m ($(echo "$TOTAL_MAX_CPU/1000" | bc -l) cores)"
 echo "MAX MEM: ${TOTAL_MAX_MEM}Mi ($(echo "$TOTAL_MAX_MEM/1024" | bc -l) Gi)"
 
 
-
+Compte rendu – Vérification du dashboard
+OOMKilled : un seul pod apparaît dans les données affichées ; à vérifier si cela correspond bien à la réalité.
+CrashLoopBackOff : aucune donnée n’est actuellement remontée dans le dashboard.
+CPU des pods : certaines valeurs affichent 0.0, alors que le graphe montre une légère consommation ; l’affichage semble tronquer la valeur à une seule décimale et doit être ajusté.
+Nombre de containers : une vérification côté équipe est nécessaire afin de confirmer que le nombre de containers remonté par le dashboard correspond bien au nombre réel.
+Conclusion : la structure du dashboard est conforme au besoin, mais plusieurs points de récupération et de restitution des données restent à fiabiliser.
 
 
 
