@@ -1,0 +1,203 @@
+# 🚀 Migration Jenkins → GitLab CI — Impacts CD / ArgoCD
+
+> **Objectif :** migrer le moteur CI de Jenkins vers GitLab CI tout en garantissant la continuité et l'équivalence fonctionnelle de la chaîne **CD / ArgoCD**.
+
+---
+
+## 🎯 1. Périmètre
+
+La migration concerne principalement le **moteur CI** et son raccordement aux mécanismes CD.
+
+### 🔄 Flux concerné
+
+```text
+┌──────────────┐
+│   BU / IO    │
+│              │
+│ Code + CI    │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────┐
+│  GitLab CI   │
+│              │
+│ Build        │
+│ Test         │
+│ Promotion    │
+└──────┬───────┘
+       │
+       │ CI → CD
+       ▼
+┌──────────────────┐
+│   CD-KAAS        │
+│   ArgoCD         │
+│                  │
+│ Create           │
+│ Sync             │
+│ Status           │
+│ Rollback         │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│    OpenShift     │
+│                  │
+│ Applications     │
+└──────────────────┘
+```
+
+### 🔑 Principe
+
+> **Jenkins → GitLab CI : changement du moteur CI**  
+> **ArgoCD : reste le moteur CD**
+
+---
+
+# 🏗️ 2. Architecture cible
+
+```text
+                         ┌─────────────────────┐
+                         │       GitLab        │
+                         │                     │
+                         │ Repository          │
+                         │ .gitlab-ci.yml      │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │     GitLab CI       │
+                         │                     │
+                         │  Build / Test       │
+                         │  Promotion          │
+                         │  Deploy             │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │      cd-tools       │
+                         │                     │
+                         │ ArgoCD CLI           │
+                         │ Vault CLI            │
+                         │ Git / autres outils │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │       ArgoCD        │
+                         │                     │
+                         │ Application         │
+                         │ Sync                │
+                         │ Status              │
+                         │ Rollback            │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │      OpenShift      │
+                         │                     │
+                         │ Applications / Pods │
+                         └─────────────────────┘
+```
+
+> ⚠️ **`cd-tools` est une image d'outillage utilisée par les jobs CI. Ce n'est pas un runtime applicatif.**
+
+---
+
+# 🔀 3. Avant / Après
+
+| Composant | 🔵 Avant | 🟢 Après |
+|---|---|---|
+| Moteur CI | Jenkins | GitLab CI |
+| Pipeline | `Jenkinsfile` | `.gitlab-ci.yml` |
+| Templates | Jenkins / shared libraries | Templates GitLab CI/CD |
+| Promotion | Jenkins | GitLab CI |
+| CD | ArgoCD | ArgoCD |
+| Synchronisation | ArgoCD | ArgoCD |
+| Déploiement | ArgoCD → OpenShift | ArgoCD → OpenShift |
+| Rollback | ArgoCD | ArgoCD |
+
+### ✅ Ce qui reste inchangé côté CD
+
+```text
+                    GitLab CI
+                        │
+                        ▼
+                   Promotion
+                        │
+                        ▼
+                     ArgoCD
+                        │
+          ┌─────────────┼─────────────┐
+          ▼             ▼             ▼
+       Create          Sync      Wait-for-status
+          │             │             │
+          └─────────────┼─────────────┘
+                        ▼
+                    OpenShift
+                        │
+                        ▼
+                   Application
+```
+
+---
+
+# 🔐 4. Authentification GitLab CI → Vault → CD
+
+Le passage Jenkins → GitLab CI implique de vérifier l'identité utilisée par le pipeline.
+
+```text
+┌─────────────────────┐
+│      GitLab CI      │
+│                     │
+│  Project ID         │
+│  JWT / ID Token     │
+└──────────┬──────────┘
+           │
+           │ Authentication
+           ▼
+┌─────────────────────┐
+│        Vault        │
+│                     │
+│ Policies            │
+│ Roles               │
+│ Secrets              │
+└──────────┬──────────┘
+           │
+           │ Credentials
+           ▼
+┌─────────────────────┐
+│    CD / ArgoCD      │
+└─────────────────────┘
+```
+
+### 🔎 Points à vérifier
+
+- `project_id`
+- identité GitLab CI
+- JWT / ID Token
+- rôle Vault
+- policies Vault
+- secrets / credentials
+- droits nécessaires aux opérations CD
+
+> ⚠️ Un changement de `project_id` peut nécessiter une adaptation des rôles / policies utilisés pour l'authentification.
+
+---
+
+# 👥 5. Répartition des responsabilités
+
+## 🟦 BU / IO — Projet applicatif
+
+### Responsabilité
+
+Adapter le pipeline et valider le fonctionnement applicatif.
+
+### Actions
+
+- [ ] Migrer `Jenkinsfile` → `.gitlab-ci.yml`
+- [ ] Adapter les templates spécifiques
+- [ ] Vérifier les variables
+- [ ] Vérifier le `project_id`
+- [ ] Vérifier les prérequis d'authentification
+- [ ] Tester la promotion
+- [ ] Tester le déploiement Ar
