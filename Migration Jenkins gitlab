@@ -1,638 +1,574 @@
-# 🚀 Migration Jenkins → GitLab CI — Impacts CD / ArgoCD
+# 🚀 Migration Jenkins → GitLab CI
+## Procédure d'accompagnement — Périmètre CD / ArgoCD
 
-> **Objectif :** migrer le moteur CI de Jenkins vers GitLab CI tout en garantissant la continuité et l'équivalence fonctionnelle de la chaîne **CD / ArgoCD**.
-
----
-
-## 🎯 1. Périmètre
-
-La migration concerne principalement le **moteur CI** et son raccordement aux mécanismes CD.
-
-### 🔄 Flux concerné
-
-```text
-┌──────────────┐
-│   BU / IO    │
-│              │
-│ Code + CI    │
-└──────┬───────┘
-       │
-       ▼
-┌──────────────┐
-│  GitLab CI   │
-│              │
-│ Build        │
-│ Test         │
-│ Promotion    │
-└──────┬───────┘
-       │
-       │ CI → CD
-       ▼
-┌──────────────────┐
-│   CD-KAAS        │
-│   ArgoCD         │
-│                  │
-│ Create           │
-│ Sync             │
-│ Status           │
-│ Rollback         │
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐
-│    OpenShift     │
-│                  │
-│ Applications     │
-└──────────────────┘
-```
-
-### 🔑 Principe
-
-> **Jenkins → GitLab CI : changement du moteur CI**  
-> **ArgoCD : reste le moteur CD**
+> **Objet**
+>
+> Cette page décrit l'accompagnement des équipes utilisatrices lors de la migration **Jenkins → GitLab CI**, uniquement pour les aspects liés au **CD / ArgoCD**.
+>
+> Le **DevOps Portal**, GitLab CI, Vault et les autres composants CI sont gérés par les équipes responsables de ces périmètres.
+>
+> **Périmètre de cette page : préparation, validation et accompagnement de la chaîne CD / ArgoCD.**
 
 ---
 
-# 🏗️ 2. Architecture cible
+# 1. 🎯 Périmètre
 
-```text
-                         ┌─────────────────────┐
-                         │       GitLab        │
-                         │                     │
-                         │ Repository          │
-                         │ .gitlab-ci.yml      │
-                         └──────────┬──────────┘
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │     GitLab CI       │
-                         │                     │
-                         │  Build / Test       │
-                         │  Promotion          │
-                         │  Deploy             │
-                         └──────────┬──────────┘
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │      cd-tools       │
-                         │                     │
-                         │ ArgoCD CLI           │
-                         │ Vault CLI            │
-                         │ Git / autres outils │
-                         └──────────┬──────────┘
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │       ArgoCD        │
-                         │                     │
-                         │ Application         │
-                         │ Sync                │
-                         │ Status              │
-                         │ Rollback            │
-                         └──────────┬──────────┘
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │      OpenShift      │
-                         │                     │
-                         │ Applications / Pods │
-                         └─────────────────────┘
-```
+## ✅ Dans le périmètre CD / ArgoCD
 
-> ⚠️ **`cd-tools` est une image d'outillage utilisée par les jobs CI. Ce n'est pas un runtime applicatif.**
+Cette procédure couvre :
 
----
+- l'impact de la migration Jenkins → GitLab CI sur la chaîne **CD** ;
+- les prérequis nécessaires pour utiliser les mécanismes CD depuis GitLab CI ;
+- l'utilisation des mécanismes de promotion existants ;
+- les opérations réalisées avec **ArgoCD** ;
+- la validation de la chaîne **Promotion → ArgoCD → OpenShift** ;
+- l'accompagnement des utilisateurs lors des premiers tests ;
+- la qualification des incidents relevant du périmètre CD / ArgoCD ;
+- l'identification des informations nécessaires pour solliciter l'équipe CD-KAAS.
 
-# 🔀 3. Avant / Après
+## ❌ Hors périmètre
 
-| Composant | 🔵 Avant | 🟢 Après |
-|---|---|---|
-| Moteur CI | Jenkins | GitLab CI |
-| Pipeline | `Jenkinsfile` | `.gitlab-ci.yml` |
-| Templates | Jenkins / shared libraries | Templates GitLab CI/CD |
-| Promotion | Jenkins | GitLab CI |
-| CD | ArgoCD | ArgoCD |
-| Synchronisation | ArgoCD | ArgoCD |
-| Déploiement | ArgoCD → OpenShift | ArgoCD → OpenShift |
-| Rollback | ArgoCD | ArgoCD |
+Les sujets suivants ne sont pas pris en charge par cette procédure :
 
-### ✅ Ce qui reste inchangé côté CD
-
-```text
-                    GitLab CI
-                        │
-                        ▼
-                   Promotion
-                        │
-                        ▼
-                     ArgoCD
-                        │
-          ┌─────────────┼─────────────┐
-          ▼             ▼             ▼
-       Create          Sync      Wait-for-status
-          │             │             │
-          └─────────────┼─────────────┘
-                        ▼
-                    OpenShift
-                        │
-                        ▼
-                   Application
-```
-
----
-
-# 🔐 4. Authentification GitLab CI → Vault → CD
-
-Le passage Jenkins → GitLab CI implique de vérifier l'identité utilisée par le pipeline.
-
-```text
-┌─────────────────────┐
-│      GitLab CI      │
-│                     │
-│  Project ID         │
-│  JWT / ID Token     │
-└──────────┬──────────┘
-           │
-           │ Authentication
-           ▼
-┌─────────────────────┐
-│        Vault        │
-│                     │
-│ Policies            │
-│ Roles               │
-│ Secrets              │
-└──────────┬──────────┘
-           │
-           │ Credentials
-           ▼
-┌─────────────────────┐
-│    CD / ArgoCD      │
-└─────────────────────┘
-```
-
-### 🔎 Points à vérifier
-
-- `project_id`
-- identité GitLab CI
-- JWT / ID Token
-- rôle Vault
-- policies Vault
-- secrets / credentials
-- droits nécessaires aux opérations CD
-
-> ⚠️ Un changement de `project_id` peut nécessiter une adaptation des rôles / policies utilisés pour l'authentification.
-
----
-
-# 👥 5. Répartition des responsabilités
-
-## 🟦 BU / IO — Projet applicatif
-
-### Responsabilité
-
-Adapter le pipeline et valider le fonctionnement applicatif.
-
-### Actions
-
-- [ ] Migrer `Jenkinsfile` → `.gitlab-ci.yml`
-- [ ] Adapter les templates spécifiques
-- [ ] Vérifier les variables
-- [ ] Vérifier le `project_id`
-- [ ] Vérifier les prérequis d'authentification
-- [ ] Tester la promotion
-- [ ] Tester le déploiement ArgoCD
-- [ ] Réaliser les tests applicatifs
-- [ ] Valider le fonctionnement E2E
-
-```text
-       🟦 BU / IO
-           │
-           ├── Pipeline
-           ├── Variables
-           ├── Image
-           ├── Tests
-           └── Validation E2E
-                    │
-                    ▼
-               GitLab CI
-                    │
-                    ▼
-                 ArgoCD
-```
-
----
-
-## 🟨 DevOps Portal — Plateforme
-
-### Responsabilité
-
-Fournir les prérequis nécessaires à l'utilisation de GitLab CI.
-
-### Actions
-
-- [ ] Activer GitLab CI/CD sur les projets
-- [ ] Vérifier les droits / accès
-- [ ] Vérifier les prérequis de plateforme
-- [ ] Permettre la coexistence Jenkins / GitLab CI
-- [ ] Accompagner les opérations de bascule
-- [ ] Réaliser les opérations portail nécessaires
-- [ ] Nettoyer les anciennes configurations après migration
-
-```text
-             🟨 DevOps Portal
-                    │
-        ┌───────────┼───────────┐
-        ▼           ▼           ▼
-    Activation    Accès     Transition
-        │           │           │
-        └───────────┼───────────┘
-                    ▼
-                GitLab CI
-```
-
----
-
-## 🟩 CD-KAAS / ArgoCD — Équipe CD
-
-### Responsabilité
-
-Garantir la continuité et l'équivalence fonctionnelle de la chaîne CD.
-
-### Actions
-
-- [ ] Maintenir les templates / mécanismes CD
-- [ ] Vérifier les mécanismes de promotion
-- [ ] Vérifier les opérations ArgoCD
-- [ ] Accompagner les tests E2E
-- [ ] Vérifier les mécanismes d'authentification CD
-- [ ] Analyser les erreurs ArgoCD
-- [ ] Qualifier les incidents CI → CD
-- [ ] Capitaliser les écarts rencontrés
-
-```text
-                  🟩 CD-KAAS
-                      │
-                      ▼
-                GitLab CI
-                      │
-                      ▼
-                 Promotion
-                      │
-                      ▼
-                   ArgoCD
-                 ↙   │   ↘
-              Sync  Status  Rollback
-                 \   │   /
-                    ▼
-                OpenShift
-```
-
----
-
-# 🔧 6. Procédure de migration
-
-## Phase 1 — Préparation
-
-### 🟦 BU / IO
-
-→ Identifier le pipeline Jenkins  
-→ Identifier les étapes de promotion / déploiement  
-→ Identifier les variables spécifiques
-
-### 🟨 DevOps Portal
-
-→ Activer GitLab CI/CD  
-→ Vérifier les accès  
-→ Vérifier les prérequis
-
-### 🟩 CD-KAAS
-
-→ Vérifier les templates CD  
-→ Vérifier les mécanismes ArgoCD  
-→ Identifier les prérequis techniques
-
----
-
-## Phase 2 — Migration du pipeline
-
-```text
-┌───────────────┐
-│   Jenkins     │
-│               │
-│ Jenkinsfile   │
-└───────┬───────┘
-        │
-        │ Migration
-        ▼
-┌───────────────┐
-│   GitLab CI   │
-│               │
-│ .gitlab-ci.yml│
-└───────┬───────┘
-        │
-        ▼
-┌───────────────┐
-│ Templates CI  │
-│     / CD      │
-└───────────────┘
-```
-
-### Exemple de structure
-
-```yaml
-stages:
-  - build
-  - promote
-  - deploy
-  - validation
-```
-
-> ℹ️ La structure exacte dépend des templates GitLab CI/CD standards utilisés.
-
----
-
-# 🔄 7. Phase de coexistence Jenkins / GitLab CI
-
-Pendant la transition, Jenkins et GitLab CI peuvent temporairement coexister.
-
-```text
-                       Projet
-                         │
-               ┌─────────┴─────────┐
-               │                   │
-               ▼                   ▼
-          🔵 Jenkins          🟢 GitLab CI
-               │                   │
-               └─────────┬─────────┘
-                         │
-                         ▼
-                      ArgoCD
-                         │
-                         ▼
-                     OpenShift
-```
-
-### ⚠️ Point de vigilance
-
-Éviter qu'un même projet déclenche simultanément une opération de promotion ou de déploiement depuis Jenkins et GitLab CI.
-
-La bascule définitive intervient après validation du nouveau flux.
-
----
-
-# 🧪 8. Validation technique
-
-La validation doit porter sur **l'ensemble de la chaîne**, et pas uniquement sur la réussite du pipeline GitLab CI.
-
-```text
-Commit
-  │
-  ▼
-GitLab CI
-  │
-  ├── Build             ✓
-  ├── Test              ✓
-  │
-  ▼
-Image Docker
-  │
-  ▼
-Promotion               ✓
-  │
-  ▼
-ArgoCD
-  │
-  ├── Create            ✓
-  ├── Sync              ✓
-  └── Wait status       ✓
-  │
-  ▼
-OpenShift
-  │
-  ▼
-Application
-  │
-  ▼
-Tests E2E               ✓
-```
-
-### ✅ Checklist
-
-- [ ] Pipeline GitLab CI OK
-- [ ] Build OK
-- [ ] Image publiée
-- [ ] Promotion OK
-- [ ] Authentification OK
-- [ ] ArgoCD Create OK
-- [ ] ArgoCD Sync OK
-- [ ] Wait-for-status OK
-- [ ] Déploiement OpenShift OK
-- [ ] Tests applicatifs OK
-- [ ] Aucun double déclenchement
-- [ ] Ancienne configuration Jenkins supprimée
-
----
-
-# 🆘 9. Support attendu de l'équipe CD-KAAS
-
-## Avant migration
-
-📌 **Préparation**
-
-- Fournir / maintenir les templates CD.
-- Documenter les mécanismes de promotion.
-- Identifier les prérequis ArgoCD.
-- Identifier les prérequis d'authentification.
-- Fournir un scénario de test de référence.
-
-## Pendant migration
-
-🔧 **Accompagnement**
-
-- Répondre aux questions concernant Promote / ArgoCD.
-- Accompagner les premiers tests BU / IO.
-- Analyser les erreurs CD.
-- Vérifier l'équivalence Jenkins / GitLab CI.
-- Aider à qualifier les problèmes d'authentification liés au CD.
-
-## Après migration
-
-🛠️ **Stabilisation**
-
-- Qualifier les incidents remontés.
-- Distinguer les problèmes CI / Portal / CD.
-- Corriger ou faire évoluer les composants CD communs si nécessaire.
-- Capitaliser les problèmes rencontrés.
-- Mettre à jour la documentation.
-
-```text
-       Migration
-           │
-           ▼
-   ┌───────────────┐
-   │   CD-KAAS     │
-   └───────┬───────┘
-           │
-     ┌─────┼─────┐
-     ▼     ▼     ▼
-   Avant  Pendant Après
-     │      │      │
-     ▼      ▼      ▼
-   Prépa  Support Stabilisation
-```
-
----
-
-# 🧭 10. Qualification des incidents
-
-| Symptôme | Première équipe à solliciter |
+| Domaine | Responsable |
 |---|---|
-| ❌ Pipeline GitLab CI ne démarre pas | 🟨 DevOps Portal / 🟦 BU |
-| ❌ `.gitlab-ci.yml` incorrect | 🟦 BU / IO |
-| ❌ Template GitLab CI | 🟨 DevOps Portal / équipe template |
-| ❌ Accès GitLab | 🟨 DevOps Portal |
-| ❌ Authentification Vault | Équipe responsable du mécanisme |
-| ❌ Promotion image | 🟩 CD-KAAS |
-| ❌ ArgoCD `create` | 🟩 CD-KAAS |
-| ❌ ArgoCD `sync` | 🟩 CD-KAAS |
-| ❌ `wait-for-status` | 🟩 CD-KAAS + 🟦 BU selon la cause |
-| ❌ Déploiement OK mais application KO | 🟦 BU / IO |
-| ❌ Ancienne configuration Jenkins | 🟨 DevOps Portal / 🟦 BU |
+| GitLab CI | Équipe responsable GitLab / CI |
+| `.gitlab-ci.yml` | Utilisateur / équipe projet |
+| Jenkins | Équipe / projet concerné |
+| DevOps Portal | **Équipe DevOps Portal** |
+| Activation GitLab CI | **Équipe DevOps Portal** |
+| Droits / configuration Portal | **Équipe DevOps Portal** |
+| Vault | Équipe responsable de Vault |
+| Développement applicatif | Équipe applicative |
+| Tests fonctionnels applicatifs | Équipe applicative |
+| CD / ArgoCD | 🟩 **CD-KAAS** |
+
+> **Important :**
+>
+> Le fait qu'un problème apparaisse lors de l'exécution d'un pipeline GitLab CI ne signifie pas nécessairement qu'il relève du périmètre CD / ArgoCD.
+>
+> L'équipe CD-KAAS intervient lorsque l'exécution atteint ou sollicite effectivement les mécanismes de **promotion / CD / ArgoCD**.
 
 ---
 
-# 🧹 11. Nettoyage post-migration
+# 2. 🏗️ Positionnement de la chaîne CD
 
-Une fois la migration validée :
+La migration concerne principalement le moteur CI.
 
-```text
-                🔵 Jenkins
-                    │
-          ┌─────────┼─────────┐
-          ▼         ▼         ▼
-       Pipeline  Paramètres  project_id
-          │         │         │
-          └─────────┼─────────┘
-                    │
-                    ▼
-                 🧹 Cleanup
-                    │
-                    ▼
-              🟢 GitLab CI
-```
+Le mécanisme CD reste basé sur ArgoCD.
 
-Les anciennes configurations Jenkins doivent être supprimées uniquement après validation complète du flux GitLab CI → CD.
+### Chaîne cible
 
----
+**GitLab CI**
 
-# ⚠️ 12. Points de vigilance CD
+↓
 
-### 🔹 Équivalence fonctionnelle
+**Mécanisme de promotion**
 
-Les opérations CD utilisées avant migration doivent rester disponibles après migration.
+↓
 
-### 🔹 Promotion
+**ArgoCD**
 
-Vérifier que la bonne image et la bonne version sont promues.
+↓
 
-### 🔹 Authentification
+**OpenShift**
 
-Vérifier l'identité GitLab CI et les droits associés.
+↓
 
-### 🔹 ArgoCD
+**Application**
+
+### 🔎 Périmètre CD-KAAS
 
 ```text
-Create
-  ↓
-Sync
-  ↓
-Wait-for-status
-  ↓
-Validation
-```
-
-### 🔹 Coexistence
-
-Éviter les doubles déclenchements Jenkins / GitLab CI.
-
-### 🔹 Validation E2E
-
-Le pipeline est considéré comme validé uniquement lorsque le flux complet est fonctionnel :
-
-```text
-GitLab CI
-    ↓
-Build
-    ↓
-Image
-    ↓
-Promotion
-    ↓
-ArgoCD
-    ↓
-Sync
-    ↓
-OpenShift
-    ↓
-Application
-    ↓
-Validation
-```
-
----
-
-# 📚 13. Documentation associée
-
-| Documentation | Lien |
-|---|---|
-| 📘 DIC Architecture / CD | `[À ajouter]` |
-| 📘 DIC Templates GitLab CI/CD | `[À ajouter]` |
-| 🔐 DIC Authentification GitLab CI / Vault | `[À ajouter]` |
-| 📘 DIC ArgoCD | `[À ajouter]` |
-| 🧩 Exemple `.gitlab-ci.yml` | `[À ajouter]` |
-| 🖥️ Captures GitLab CI | `[À ajouter]` |
-| 🖥️ Captures ArgoCD | `[À ajouter]` |
-| 🧹 Procédure de suppression de l'ancien `project_id` | `[À ajouter]` |
-
----
-
-# 📌 14. Synthèse
-
-```text
-                         MIGRATION CI
-                              │
-             ┌────────────────┴────────────────┐
-             │                                 │
-        🔵 Jenkins                       🟢 GitLab CI
-             │                                 │
-             └────────────────┬────────────────┘
-                              │
-                              ▼
-                       Templates / Jobs
-                              │
-                              ▼
-                       🟩 CD-KAAS
-                              │
-                              ▼
-                           ArgoCD
-                              │
-                 ┌────────────┼────────────┐
-                 ▼            ▼            ▼
-              Create         Sync      Wait-status
-                 │            │            │
-                 └────────────┼────────────┘
-                              ▼
-                          OpenShift
-                              │
-                              ▼
+                         PÉRIMÈTRE CD-KAAS
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │     Promotion       │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │       ArgoCD        │
+                    │                     │
+                    │  create / sync /    │
+                    │  wait-for-status    │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │      OpenShift      │
+                    └──────────┬──────────┘
+                               │
+                               ▼
                          Application
 ```
 
-> ## 🎯 Principe directeur
+> Les étapes situées en amont du mécanisme CD restent sous la responsabilité des équipes qui les administrent.
+
+---
+
+# 3. 🔄 Ce qui change avec la migration
+
+## Avant
+
+```text
+Jenkins
+   │
+   ├── Pipeline
+   │
+   ├── Promotion
+   │
+   ▼
+ ArgoCD
+   │
+   ▼
+OpenShift
+```
+
+## Après
+
+```text
+GitLab CI
+   │
+   ├── Pipeline
+   │
+   ├── Promotion
+   │
+   ▼
+ ArgoCD
+   │
+   ▼
+OpenShift
+```
+
+### 📌 Conséquence pour le CD
+
+Le remplacement de Jenkins par GitLab CI **ne remet pas en cause le rôle d'ArgoCD**.
+
+Le point à vérifier côté CD est principalement :
+
+> **Le mécanisme de promotion déclenché depuis GitLab CI permet-il toujours d'exécuter correctement les opérations CD attendues ?**
+
+---
+
+# 4. 👤 Accompagnement utilisateur
+
+Cette page constitue une **procédure d'accompagnement destinée aux équipes utilisatrices**.
+
+L'objectif est de leur permettre de :
+
+1. préparer leur migration ;
+2. vérifier les prérequis nécessaires au CD ;
+3. effectuer un premier test ;
+4. valider la promotion ;
+5. vérifier le déploiement ArgoCD ;
+6. identifier rapidement le périmètre d'un éventuel incident.
+
+### 🟩 Rôle CD-KAAS
+
+L'accompagnement CD-KAAS consiste notamment à :
+
+- expliquer les prérequis CD ;
+- indiquer les mécanismes à utiliser ;
+- accompagner les premiers tests ;
+- vérifier le comportement d'ArgoCD ;
+- analyser les erreurs relevant du CD ;
+- aider à qualifier un incident ;
+- orienter vers l'équipe appropriée lorsqu'il ne relève pas du CD.
+
+> **L'accompagnement ne transfère pas la responsabilité du pipeline ou de la configuration GitLab CI vers CD-KAAS.**
+
+---
+
+# 5. 📋 Prérequis avant test CD
+
+Avant de solliciter l'équipe CD-KAAS pour un test ou une analyse, l'équipe utilisatrice doit disposer des éléments nécessaires à l'exécution de son pipeline.
+
+### Côté utilisateur
+
+☐ Pipeline GitLab CI disponible.
+
+☐ `.gitlab-ci.yml` configuré.
+
+☐ Template GitLab CI approprié utilisé.
+
+☐ Projet GitLab correctement configuré.
+
+☐ Prérequis définis par l'équipe DevOps Portal satisfaits.
+
+☐ Mécanisme d'authentification nécessaire disponible.
+
+☐ Artefact / image disponible pour la promotion.
+
+☐ Environnement cible identifié.
+
+☐ Application ArgoCD cible identifiée.
+
+> Les prérequis GitLab CI / Portal ne sont pas administrés par CD-KAAS.
+
+---
+
+# 6. 🚀 Test de promotion
+
+Une fois les prérequis satisfaits, l'utilisateur peut effectuer un premier test de promotion.
+
+### Flux attendu
+
+```text
+GitLab CI
+    │
+    ▼
+Job de promotion
+    │
+    ▼
+Mécanisme CD
+    │
+    ▼
+ArgoCD
+    │
+    ├── create
+    ├── sync
+    └── wait-for-status
+    │
+    ▼
+OpenShift
+```
+
+### 🎯 Objectif du test
+
+Vérifier que la migration n'a pas introduit de rupture sur la chaîne :
+
+> **GitLab CI → Promotion → ArgoCD → OpenShift**
+
+---
+
+# 7. 🟩 Validation ArgoCD
+
+Lors du test, les points suivants peuvent être vérifiés côté CD.
+
+| Contrôle | Résultat attendu |
+|---|---|
+| Accès au mécanisme CD | ✅ Fonctionnel |
+| Application ArgoCD cible | ✅ Identifiée |
+| `create` | ✅ Si nécessaire |
+| `sync` | ✅ Succès |
+| `wait-for-status` | ✅ État attendu |
+| Ressources OpenShift | ✅ Déployées |
+| État ArgoCD | ✅ Conforme |
+| Déploiement | ✅ Terminé |
+
+### ⚠️ Attention
+
+Un pipeline GitLab CI terminé avec succès ne constitue pas à lui seul une validation CD.
+
+La validation doit également confirmer le résultat côté **ArgoCD / OpenShift**.
+
+---
+
+# 8. 🔍 Qualification des incidents
+
+Lorsqu'un problème est rencontré, la première étape consiste à déterminer **à quel niveau la chaîne est en échec**.
+
+| Symptôme | Périmètre |
+|---|---|
+| Pipeline GitLab CI ne démarre pas | ❌ Hors CD |
+| Erreur `.gitlab-ci.yml` | ❌ Hors CD |
+| Erreur template GitLab CI | ❌ Hors CD |
+| Problème d'accès GitLab | ❌ Hors CD |
+| Problème de configuration DevOps Portal | ❌ Hors CD |
+| Problème d'authentification en amont du CD | ⚠️ À qualifier |
+| Job de promotion en erreur | 🟨 À analyser |
+| Appel du mécanisme CD en erreur | 🟩 CD-KAAS |
+| ArgoCD `create` en erreur | 🟩 CD-KAAS |
+| ArgoCD `sync` en erreur | 🟩 CD-KAAS |
+| ArgoCD `wait-for-status` en erreur | 🟩 CD-KAAS |
+| Déploiement ArgoCD réussi mais application KO | 🟦 Équipe applicative |
+
+> **Principe :**
 >
-> **Jenkins → GitLab CI = migration du moteur CI**  
-> **ArgoCD = moteur CD conservé**
+> CD-KAAS prend en charge l'analyse lorsqu'un incident est identifié sur le **périmètre CD / ArgoCD**.
 >
-> 🟦 **BU / IO** → Pipeline + configuration + validation  
-> 🟨 **DevOps Portal** → Activation + accès + prérequis + transition  
-> 🟩 **CD-KAAS / ArgoCD** → Promotion + CD + ArgoCD + support technique
+> Les incidents relevant du DevOps Portal, de GitLab CI ou de l'application doivent être orientés vers les équipes correspondantes.
+
+---
+
+# 9. 🆘 Informations à fournir à CD-KAAS
+
+Lorsqu'une analyse CD est nécessaire, fournir autant que possible :
+
+### Informations générales
+
+- Nom du projet GitLab
+- Environnement concerné
+- Nom de l'application ArgoCD
+- Date / heure du test
+- Identifiant du pipeline
+- Identifiant du job concerné
+
+### Informations techniques
+
+- Étape ayant échoué
+- Message d'erreur
+- Logs du job
+- Opération ArgoCD concernée
+- État de l'application ArgoCD
+- État des ressources OpenShift
+- Capture d'écran si nécessaire
+
+### Exemple
+
+```text
+Projet       : <project>
+Pipeline     : <pipeline-id>
+Job          : <job-name>
+Environnement: <nprd/prod>
+ArgoCD App   : <application>
+Opération    : sync
+Statut       : Failed
+Erreur       : <message>
+```
+
+> Plus le point d'échec est précisément identifié, plus la qualification CD peut être rapide.
+
+---
+
+# 10. 🔐 Cas particulier : authentification
+
+L'authentification peut impliquer plusieurs composants.
+
+```text
+GitLab CI
+   │
+   ▼
+JWT / ID Token
+   │
+   ▼
+Mécanisme d'authentification
+   │
+   ▼
+Vault / Credentials
+   │
+   ▼
+Mécanisme CD
+   │
+   ▼
+ArgoCD
+```
+
+### ⚠️ Périmètre
+
+CD-KAAS intervient sur les mécanismes nécessaires au fonctionnement du **CD / ArgoCD**.
+
+En revanche, la configuration globale de :
+
+- GitLab CI ;
+- variables GitLab ;
+- templates CI ;
+- DevOps Portal ;
+- authentification gérée par une autre équipe ;
+
+reste sous la responsabilité des équipes correspondantes.
+
+> En cas de doute, le rôle de CD-KAAS est d'aider à **qualifier le point d'échec**, et non de prendre en charge la configuration des composants hors périmètre.
+
+---
+
+# 11. 🧩 Cas `cd-tools`
+
+`cd-tools` peut être utilisé comme image d'outillage par les jobs concernés par le CD.
+
+Il peut notamment contenir :
+
+- ArgoCD CLI ;
+- Git ;
+- Vault CLI ;
+- outils nécessaires aux opérations CD.
+
+### 📌 Positionnement
+
+| Élément | Rôle |
+|---|---|
+| `cd-tools` | 🛠️ Image d'outillage |
+| GitLab CI | ⚙️ Exécution du job |
+| ArgoCD CLI | 🔌 Interaction avec ArgoCD |
+| ArgoCD | 🚀 Moteur CD |
+| OpenShift | 🏃 Runtime applicatif |
+
+> **`cd-tools` n'est pas le runtime de l'application.**
+>
+> Son utilisation dans un job GitLab CI permet simplement de fournir les outils nécessaires à l'exécution des opérations concernées.
+
+---
+
+# 12. 🧪 Scénario de validation utilisateur
+
+## Phase 1 — Préparation
+
+**Utilisateur**
+
+→ Migration de son pipeline vers GitLab CI
+
+→ Vérification des prérequis Portal
+
+→ Préparation du premier test
+
+---
+
+## Phase 2 — Test CD
+
+**Utilisateur**
+
+→ Exécution du pipeline
+
+→ Déclenchement de la promotion
+
+→ Vérification du résultat CD
+
+---
+
+## Phase 3 — Vérification ArgoCD
+
+**Utilisateur + CD-KAAS**
+
+→ Vérification de l'application ArgoCD
+
+→ Vérification de la synchronisation
+
+→ Vérification de l'état attendu
+
+---
+
+## Phase 4 — Validation
+
+**Utilisateur**
+
+→ Vérification de l'application
+
+→ Validation de la migration
+
+→ Passage en fonctionnement nominal
+
+---
+
+# 13. 🔄 Coexistence Jenkins / GitLab CI
+
+Pendant la période de migration, certains projets peuvent temporairement conserver leur pipeline Jenkins.
+
+### ⚠️ Point d'attention côté CD
+
+Il faut éviter qu'un même projet déclenche simultanément plusieurs chaînes de promotion vers le même environnement.
+
+Avant la bascule, vérifier avec l'équipe projet :
+
+- quelle chaîne est active ;
+- quelle chaîne est utilisée pour les tests ;
+- quelle chaîne déclenche la promotion ;
+- à quel moment Jenkins est désactivé.
+
+> La gestion de la coexistence Jenkins / GitLab CI relève du projet et des équipes responsables de ces composants.
+>
+> CD-KAAS intervient uniquement pour les impacts éventuels sur la chaîne CD / ArgoCD.
+
+---
+
+# 14. 🧭 Critères de validation CD
+
+La migration peut être considérée comme validée du point de vue **CD / ArgoCD** lorsque :
+
+- [ ] le pipeline GitLab atteint correctement l'étape de promotion ;
+- [ ] le mécanisme de promotion est exécuté ;
+- [ ] l'application ArgoCD cible est correctement identifiée ;
+- [ ] la synchronisation ArgoCD fonctionne ;
+- [ ] `wait-for-status` retourne l'état attendu, lorsque utilisé ;
+- [ ] les ressources sont correctement déployées sur OpenShift ;
+- [ ] aucun incident CD bloquant n'est constaté.
+
+### 🎯 Validation finale
+
+```text
+GitLab CI
+   │
+   ▼
+Promotion
+   │
+   ▼
+ArgoCD
+   │
+   ▼
+OpenShift
+   │
+   ▼
+Application
+   │
+   ▼
+     ✅ VALIDATION CD
+```
+
+---
+
+# 15. 📚 Documentation associée
+
+| Documentation | Référence |
+|---|---|
+| 📘 DevOps Portal | `[Lien DIC]` |
+| 📘 GitLab CI | `[Lien DIC]` |
+| 📘 Procédure CD-KAAS | `[Lien DIC]` |
+| 📘 ArgoCD | `[Lien DIC]` |
+| 🔐 Authentification / Vault | `[Lien DIC]` |
+| 🖼️ Exemple de pipeline | `[Screenshot]` |
+| 🖼️ Exemple ArgoCD | `[Screenshot]` |
+
+---
+
+# 16. 📌 Synthèse
+
+### 🟩 CD-KAAS
+
+**Responsable du périmètre :**
+
+> **CD / ArgoCD**
+
+Intervient pour :
+
+- les prérequis CD ;
+- l'accompagnement des tests de promotion ;
+- les opérations ArgoCD ;
+- l'analyse des erreurs CD ;
+- la validation de la chaîne CD ;
+- la qualification des incidents relevant d'ArgoCD.
+
+### 🟨 DevOps Portal
+
+**Équipe distincte**
+
+Intervient sur :
+
+- le Portal ;
+- l'activation / configuration relevant du Portal ;
+- les prérequis de son périmètre ;
+- les sujets GitLab CI relevant de son domaine.
+
+### 🟦 Utilisateur / équipe projet
+
+Responsable de :
+
+- son pipeline GitLab CI ;
+- son `.gitlab-ci.yml` ;
+- ses adaptations applicatives ;
+- ses tests ;
+- la validation fonctionnelle de son application.
+
+---
+
+# 🎯 Principe à retenir
+
+> **Cette procédure ne définit pas la migration Jenkins → GitLab CI dans son ensemble.**
+>
+> Elle définit **l'accompagnement nécessaire pour que la migration puisse être validée sur le périmètre CD / ArgoCD**.
+>
+> **GitLab CI et DevOps Portal restent sous la responsabilité de leurs équipes respectives.**
+>
+> **CD-KAAS intervient sur la chaîne :**
+>
+> **Promotion → ArgoCD → OpenShift**
